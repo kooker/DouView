@@ -1,0 +1,54 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+
+    <!-- 深邃科技黑底色 -->
+    <path
+        android:fillColor="#09090C"
+        android:pathData="M0,0h320v180h-320z" />
+
+    <!-- 柔和科技红光晕装饰 -->
+    <path
+        android:fillColor="#15FE2C55"
+        android:pathData="M0,0 L320,0 L320,80 L0,140 Z" />
+
+    <!-- 顶部绿色状态条 -->
+    <path
+        android:fillColor="#00D26A"
+        android:pathData="M0,0h320v3h-320z" />
+
+    <!-- 信号雷达圆环外圈 -->
+    <path
+        android:strokeColor="#33FE2C55"
+        android:strokeWidth="1.5"
+        android:pathData="M160,90 m-44,0 a44,44 0 1,1 88,0 a44,44 0 1,1 -88,0" />
+
+    <!-- 信号雷达圆环内圈 -->
+    <path
+        android:strokeColor="#66FE2C55"
+        android:strokeWidth="1.5"
+        android:pathData="M160,90 m-28,0 a28,28 0 1,1 56,0 a28,28 0 1,1 -56,0" />
+
+    <!-- 核心雷达发射点与中心徽标 -->
+    <path
+        android:fillColor="#FE2C55"
+        android:pathData="M160,90 m-12,0 a12,12 0 1,1 24,0 a12,12 0 1,1 -24,0" />
+
+    <!-- 播放三角形微标 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M157,84 L166,90 L157,96 Z" />
+
+    <!-- TV 专线字样装饰底框 -->
+    <path
+        android:fillColor="#22FFFFFF"
+        android:pathData="M125,125 L195,125 A4,4 0 0,1 199,129 L199,141 A4,4 0 0,1 195,145 L125,145 A4,4 0 0,1 121,141 L121,129 A4,4 0 0,1 125,125 Z" />
+
+    <!-- 极客绿点缀在线状态 -->
+    <path
+        android:fillColor="#00D26A"
+        android:pathData="M130,135 m-3,0 a3,3 0 1,1 6,0 a3,3 0 1,1 -6,0" />
+
+</vector>

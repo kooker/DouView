@@ -1,0 +1,6 @@
+{
+  "name": "抖眸流控",
+  "description": "抖音直播聚合中控台，支持短链解析、口令提取、直播流直接拉取、低延时播放与频道持久化管理。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

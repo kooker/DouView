@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">抖眸流控</string>
+    <string name="input_channel_placeholder">粘贴整段口令 / 短链 / 房间号</string>
+    <string name="user_guide_title">抖眸流控 · 使用指南</string>
+</resources>
