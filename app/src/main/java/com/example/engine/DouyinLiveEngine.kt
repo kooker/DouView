@@ -381,7 +381,7 @@ object DouyinLiveEngine {
             rid = rid,
             isLive = info.isLive,
             statusKnown = info.statusKnown,
-            name = if (info.anchorName.isNotEmpty()) info.anchorName else "房间 $rid",
+            name = if (info.anchorName.isNotEmpty()) info.anchorName else "抖音主播",
             title = if (info.title.isNotEmpty()) info.title else if (info.isLive) "正在直播" else "当前未开播",
             avatar = info.avatar,
             streams = info.streams

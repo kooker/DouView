@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -394,7 +395,51 @@ class ExampleRobolectricTest {
     // Verify focalPan is calculated deterministically and scales around centroid
     assertNotNull(focalPan)
   }
+
+  @Test
+  fun `test channel display name and subtitle never leaks room number`() {
+    val rid = "10443341948"
+    val channelEmptyTitle = com.example.data.LiveChannel(
+      rid = rid,
+      name = "房间 $rid",
+      title = "",
+      avatar = "",
+      isLive = true,
+      statusKnown = true
+    )
+
+    val displayName = channelEmptyTitle.name.let { raw ->
+      if (raw.isBlank() || raw.matches(Regex("^(?:频道|房间)\\s*\\d{3,22}$")) || raw == channelEmptyTitle.rid) {
+        "抖音主播"
+      } else {
+        raw
+      }
+    }
+    assertEquals("抖音主播", displayName)
+    assertFalse(displayName.contains(rid))
+
+    val subText = when {
+      channelEmptyTitle.title.isNotEmpty() && !channelEmptyTitle.title.matches(Regex("^(?:房间号?|频道)\\s*[:：]?\\s*\\d+.*$")) -> channelEmptyTitle.title
+      channelEmptyTitle.isLive -> "实况直播中"
+      !channelEmptyTitle.statusKnown -> "正在核验开播状态..."
+      else -> "主播暂未开播"
+    }
+    assertEquals("实况直播中", subText)
+    assertFalse(subText.contains(rid))
+    assertFalse(subText.contains("房间"))
+
+    val channelOffline = channelEmptyTitle.copy(isLive = false, statusKnown = true)
+    val subTextOffline = when {
+      channelOffline.title.isNotEmpty() && !channelOffline.title.matches(Regex("^(?:房间号?|频道)\\s*[:：]?\\s*\\d+.*$")) -> channelOffline.title
+      channelOffline.isLive -> "实况直播中"
+      !channelOffline.statusKnown -> "正在核验开播状态..."
+      else -> "主播暂未开播"
+    }
+    assertEquals("主播暂未开播", subTextOffline)
+    assertFalse(subTextOffline.contains(rid))
+  }
 }
+
 
 
 

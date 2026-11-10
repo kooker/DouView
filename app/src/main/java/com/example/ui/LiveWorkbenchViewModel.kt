@@ -11,6 +11,8 @@ import com.example.engine.LiveStreamData
 import com.example.engine.QualityStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -498,7 +500,7 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
                 val maxAddedAt = repository.getAllChannels().maxOfOrNull { it.addedAt } ?: 0L
                 val newChannel = LiveChannel(
                     rid = rid,
-                    name = info?.name?.ifEmpty { "房间 $rid" } ?: existing?.name ?: "房间 $rid",
+                    name = info?.name?.ifEmpty { "抖音主播" } ?: existing?.name ?: "抖音主播",
                     title = info?.title ?: existing?.title ?: "",
                     avatar = info?.avatar ?: existing?.avatar ?: "",
                     isLive = info?.isLive ?: existing?.isLive ?: false,
@@ -552,8 +554,12 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
     fun startBackgroundProbe() {
         probeJob?.cancel()
         probeJob = viewModelScope.launch(Dispatchers.IO) {
+            // 首次载入在线测活策略优化：
+            // 启动后优先预留 1.5 秒让活跃频道优先建立视频播放与首帧缓冲，随后立即启动全量并发测活，无需死等 25 秒
+            delay(1500L)
+            probeAllChannelsInternal()
             while (isActive) {
-                delay(25_000L)
+                delay(30_000L)
                 probeAllChannelsInternal()
             }
         }
@@ -581,48 +587,67 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
     }
 
     private suspend fun probeAllChannelsInternal() = withContext(Dispatchers.IO) {
+        if (_uiState.value.isProbing) return@withContext
         _uiState.update { it.copy(isProbing = true) }
         try {
             val list = repository.getAllChannels()
             val changedChannels = mutableListOf<LiveChannel>()
-            for (channel in list) {
-                val data = DouyinLiveEngine.fetchRoomInfo(channel.rid)
-                if (data != null) {
-                    val remoteName = data.name.trim()
-                    val newName = if (remoteName.isNotEmpty() && !isPlaceholderName(remoteName, channel.rid)) {
-                        remoteName
-                    } else {
-                        channel.name
-                    }
 
-                    val remoteTitle = data.title.trim()
-                    val newTitle = if (remoteTitle.isNotEmpty() && !isPlaceholderTitle(remoteTitle)) {
-                        remoteTitle
-                    } else {
-                        channel.title
-                    }
-
-                    val newAvatar = if (data.avatar.isNotEmpty()) data.avatar else channel.avatar
-
-                    val changed = data.isLive != channel.isLive ||
-                            data.statusKnown != channel.statusKnown ||
-                            newName != channel.name ||
-                            newTitle != channel.title ||
-                            newAvatar != channel.avatar
-
-                    if (changed) {
-                        changedChannels.add(
-                            channel.copy(
-                                isLive = data.isLive,
-                                statusKnown = data.statusKnown,
-                                title = newTitle,
-                                name = newName,
-                                avatar = newAvatar,
-                                addedAt = channel.addedAt // 严格保持原有添加时序，对标网页版同级稳定排序
-                            )
-                        )
+            // 采用分批并发测活策略（每批 3 个并发）：兼顾高吞吐量快速测活与防反爬限频保护
+            val batches = list.chunked(3)
+            for (batch in batches) {
+                if (!coroutineContext.isActive) break
+                val probeJobs = batch.map { channel ->
+                    async(Dispatchers.IO) {
+                        try {
+                            val data = DouyinLiveEngine.fetchRoomInfo(channel.rid)
+                            Pair(channel, data)
+                        } catch (_: Exception) {
+                            Pair(channel, null)
+                        }
                     }
                 }
+                val batchResults = probeJobs.awaitAll()
+                for ((channel, data) in batchResults) {
+                    if (data != null) {
+                        val remoteName = data.name.trim()
+                        val newName = if (remoteName.isNotEmpty() && !isPlaceholderName(remoteName, channel.rid)) {
+                            remoteName
+                        } else {
+                            channel.name
+                        }
+
+                        val remoteTitle = data.title.trim()
+                        val newTitle = if (remoteTitle.isNotEmpty() && !isPlaceholderTitle(remoteTitle)) {
+                            remoteTitle
+                        } else {
+                            channel.title
+                        }
+
+                        val newAvatar = if (data.avatar.isNotEmpty()) data.avatar else channel.avatar
+
+                        val changed = data.isLive != channel.isLive ||
+                                data.statusKnown != channel.statusKnown ||
+                                newName != channel.name ||
+                                newTitle != channel.title ||
+                                newAvatar != channel.avatar
+
+                        if (changed) {
+                            changedChannels.add(
+                                channel.copy(
+                                    isLive = data.isLive,
+                                    statusKnown = data.statusKnown,
+                                    title = newTitle,
+                                    name = newName,
+                                    avatar = newAvatar,
+                                    addedAt = channel.addedAt // 严格保持原有添加时序，对标网页版同级稳定排序
+                                )
+                            )
+                        }
+                    }
+                }
+                // 批次间微休眠 150ms 保护网络与系统低功耗
+                delay(150L)
             }
             // 探活全轮询完毕后一次性原子更新，彻底消除逐条探活引起的界面频繁闪烁与跳动
             if (changedChannels.isNotEmpty()) {
@@ -751,7 +776,7 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
                     val rid = item.optString("rid").ifEmpty { item.optString("id") }
                     if (rid.isNotEmpty() && rid.matches(Regex("\\d{3,22}"))) {
                         val rawName = item.optString("name").trim()
-                        val name = if (rawName.isNotEmpty() && !isPlaceholderName(rawName, rid)) rawName else "频道 $rid"
+                        val name = if (rawName.isNotEmpty() && !isPlaceholderName(rawName, rid)) rawName else "抖音主播"
                         val rawTitle = item.optString("title").trim()
                         val title = if (rawTitle.isNotEmpty() && !isPlaceholderTitle(rawTitle)) rawTitle else "已导入频道"
                         val avatar = item.optString("avatar", "")
@@ -786,7 +811,7 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
             if (m != null) {
                 val rid = m.value
                 val rawName = if (parts.size > 1) parts[1].trim() else ""
-                val name = if (rawName.isNotEmpty() && !isPlaceholderName(rawName, rid)) rawName else "频道 $rid"
+                val name = if (rawName.isNotEmpty() && !isPlaceholderName(rawName, rid)) rawName else "抖音主播"
                 val rawTitle = if (parts.size > 2) parts[2].trim() else ""
                 val title = if (rawTitle.isNotEmpty() && !isPlaceholderTitle(rawTitle)) rawTitle else "已导入频道"
                 result.add(
@@ -832,7 +857,7 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
                     currentVersion = "1.0.0",
                     latestVersion = "1.0.0",
                     isLatest = true,
-                    updateLog = "• 仿抖音双指中心流畅缩放：以双指触控中心点为锚点无级缩放（最高 10x 显微级画质巡检），支持双击快速缩放与阻尼边缘吸附回弹\n• 全场景手势与按键防冲突引擎：设立左/右/中三区物理隔离与单手势互斥锁存机制，消除音量调节与上下切台误触冲突\n• 息屏与后台防断流组件：退至后台或息屏自动转为仅音频模式，降低 95% 带宽，保持系统音频焦点持续拉流\n• 直播流精准侦测与稳定单会话收敛引擎：重构视频轨侦测机制，首帧渲染即锁，消除误判，彻底杜绝画质反复来回切换\n• 电视端全功能适配：电视遥控器方向键切台防抖，主页键与退出意图彻底释放后台资源\n• 本地持久化与多格式导入导出：采用 Room 本地 SQLite 数据库，离线保存关注频道，支持 JSON/TXT/CSV 安全导入导出",
+                    updateLog = "【本系统功能简介】\n• 仿抖音双指中心流畅缩放：以双指触控中心点为锚点无级缩放（最高 10x 显微级画质巡检），支持双击快速缩放与阻尼边缘吸附回弹\n• 全场景手势与按键防冲突引擎：设立左/右/中三区物理隔离与单手势互斥锁存机制，消除音量调节与上下切台误触冲突\n• 息屏与后台防断流组件：退至后台或息屏自动转为仅音频模式，降低 95% 带宽，保持系统音频焦点持续拉流\n• 直播流精准侦测与稳定单会话收敛引擎：重构视频轨侦测机制，首帧渲染即锁，消除误判，彻底杜绝画质反复来回切换\n• 优化首次载入在线测活策略：首播 1.5 秒秒开避让 + 分批并发探测，状态原子写入，界面丝滑无跳动\n• 电视端全功能适配：电视遥控器方向键切台防抖，主页键与退出意图彻底释放后台资源\n• 本地持久化与多格式导入导出：采用 Room 本地 SQLite 数据库，离线保存关注频道，支持 JSON/TXT/CSV 安全导入导出",
                     downloadUrl = "https://github.com/kooker/DouView"
                 )
             )

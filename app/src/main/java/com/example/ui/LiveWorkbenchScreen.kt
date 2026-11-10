@@ -1032,9 +1032,19 @@ private fun BannerHeader(
             Spacer(modifier = Modifier.width(10.dp))
 
             // 名称与标题
+            val bannerDisplayName = activeChannel?.name?.let {
+                if (it.isBlank() || it.matches(Regex("^(?:频道|房间)\\s*\\d{3,22}$")) || it == activeChannel.rid) "抖音主播" else it
+            } ?: "请选择直播间"
+            val bannerSubText = when {
+                activeChannel == null -> "从下方列表中点击频道开始播放"
+                activeChannel.title.isNotEmpty() && !activeChannel.title.matches(Regex("^(?:房间号?|频道)\\s*[:：]?\\s*\\d+.*$")) -> activeChannel.title
+                activeChannel.isLive -> "实况直播中"
+                !activeChannel.statusKnown -> "正在核验开播状态..."
+                else -> "主播暂未开播"
+            }
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = activeChannel?.name ?: "请选择直播间",
+                    text = bannerDisplayName,
                     color = MaterialTheme.colorScheme.onSurface,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Bold,
@@ -1042,7 +1052,7 @@ private fun BannerHeader(
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = activeChannel?.title?.ifEmpty { "房间号: ${activeChannel.rid}" } ?: "从下方列表中点击频道开始播放",
+                    text = bannerSubText,
                     color = StudioSub,
                     fontSize = 11.5.sp,
                     maxLines = 1,

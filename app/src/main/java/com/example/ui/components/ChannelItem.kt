@@ -158,11 +158,18 @@ fun ChannelItem(
             Column(
                 modifier = Modifier.weight(1f)
             ) {
+                val displayName = channel.name.let { raw ->
+                    if (raw.isBlank() || raw.matches(Regex("^(?:频道|房间)\\s*\\d{3,22}$")) || raw == channel.rid) {
+                        "抖音主播"
+                    } else {
+                        raw
+                    }
+                }
                 Row(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = channel.name,
+                        text = displayName,
                         color = MaterialTheme.colorScheme.onSurface,
                         fontSize = 13.5.sp,
                         fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
@@ -209,7 +216,12 @@ fun ChannelItem(
                     }
                 }
 
-                val subText = if (channel.title.isNotEmpty()) channel.title else "房间号: ${channel.rid}"
+                val subText = when {
+                    channel.title.isNotEmpty() && !channel.title.matches(Regex("^(?:房间号?|频道)\\s*[:：]?\\s*\\d+.*$")) -> channel.title
+                    channel.isLive -> "实况直播中"
+                    !channel.statusKnown -> "正在核验开播状态..."
+                    else -> "主播暂未开播"
+                }
                 Text(
                     text = subText,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
