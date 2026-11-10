@@ -381,7 +381,7 @@ object DouyinLiveEngine {
             rid = rid,
             isLive = info.isLive,
             statusKnown = info.statusKnown,
-            name = if (info.anchorName.isNotEmpty()) info.anchorName else "抖音主播",
+            name = info.anchorName.trim(),
             title = if (info.title.isNotEmpty()) info.title else if (info.isLive) "正在直播" else "当前未开播",
             avatar = info.avatar,
             streams = info.streams

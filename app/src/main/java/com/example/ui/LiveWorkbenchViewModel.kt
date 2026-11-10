@@ -103,6 +103,7 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
     private val attemptedDegradeQualities = mutableSetOf<String>()
     private var lastDegradeTimestamp = 0L
     private var hasInitialAutoPlayed = false
+    private var hasUserInteracted = false
 
     init {
         val database = AppDatabase.getDatabase(application)
@@ -122,11 +123,11 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
                     )
                 }
 
-                // 首次进入自动启播首个在线频道（严格仅执行一次，避免数据流更新触发二次启播）
+                // 首次进入自动启播首个在线频道（严格仅执行一次，优先尝试 isLive 在线频道）
                 if (!hasInitialAutoPlayed && channelList.isNotEmpty()) {
                     hasInitialAutoPlayed = true
                     val firstCandidate = channelList.firstOrNull { it.isLive } ?: channelList.first()
-                    playChannel(firstCandidate)
+                    playChannel(firstCandidate, forceRefresh = false, isUserInitiated = false)
                 }
             }
         }
@@ -134,7 +135,10 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
         startBackgroundProbe()
     }
 
-    fun playChannel(channel: LiveChannel, forceRefresh: Boolean = false) {
+    fun playChannel(channel: LiveChannel, forceRefresh: Boolean = false, isUserInitiated: Boolean = true) {
+        if (isUserInitiated) {
+            hasUserInteracted = true
+        }
         val currentToken = ++playToken
         autoDegradeCount = 0
         attemptedDegradeQualities.clear()
@@ -177,11 +181,25 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
                 }
 
                 if (streamData != null) {
-                    // 更新数据库中该频道最新信息（包含标题、开播状态与最新头像）
+                    val remoteName = streamData.name.trim()
+                    val newName = if (remoteName.isNotEmpty() && !isPlaceholderName(remoteName, channel.rid)) {
+                        remoteName
+                    } else {
+                        channel.name
+                    }
+                    val remoteTitle = streamData.title.trim()
+                    val newTitle = if (remoteTitle.isNotEmpty() && !isPlaceholderTitle(remoteTitle)) {
+                        remoteTitle
+                    } else {
+                        channel.title
+                    }
+                    val newAvatar = if (streamData.avatar.isNotEmpty()) streamData.avatar else channel.avatar
+
+                    // 更新数据库中该频道最新信息（包含标题、开播状态与最新头像），严格保留用户现有名称（如茉莉·molly）
                     val updated = channel.copy(
-                        name = if (streamData.name.isNotEmpty()) streamData.name else channel.name,
-                        title = if (streamData.title.isNotEmpty()) streamData.title else channel.title,
-                        avatar = if (streamData.avatar.isNotEmpty()) streamData.avatar else channel.avatar,
+                        name = newName,
+                        title = newTitle,
+                        avatar = newAvatar,
                         isLive = streamData.isLive,
                         statusKnown = streamData.statusKnown
                     )
@@ -235,12 +253,27 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
                                 playbackStatus = PlaybackStatus.Offline("主播当前未开播或信号中断")
                             )
                         }
+                        // 首次载入在线策略优化：若冷启动挑选的初始频道已离线且用户尚未手动干预，自动尝试接力下一个标记在线的频道
+                        if (!hasUserInteracted) {
+                            val nextCandidate = _uiState.value.channels.firstOrNull { it.rid != channel.rid && it.isLive }
+                            if (nextCandidate != null) {
+                                playChannel(nextCandidate, forceRefresh = false, isUserInitiated = false)
+                                return@launch
+                            }
+                        }
                     }
                 } else {
                     _uiState.update {
                         it.copy(
                             playbackStatus = PlaybackStatus.Error("无法获取直播流，请检查网络或房间号")
                         )
+                    }
+                    if (!hasUserInteracted) {
+                        val nextCandidate = _uiState.value.channels.firstOrNull { it.rid != channel.rid && it.isLive }
+                        if (nextCandidate != null) {
+                            playChannel(nextCandidate, forceRefresh = false, isUserInitiated = false)
+                            return@launch
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -497,10 +530,20 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
                 val existing = repository.getAllChannels().find { it.rid == rid }
                 val info = DouyinLiveEngine.fetchRoomInfo(rid)
 
+                val resolvedName = if (existing?.name?.isNotBlank() == true && !isPlaceholderName(existing.name, rid)) {
+                    existing.name
+                } else if (info?.name?.isNotBlank() == true && !isPlaceholderName(info.name, rid)) {
+                    info.name
+                } else if (info?.title?.isNotBlank() == true && !isPlaceholderTitle(info.title)) {
+                    info.title
+                } else {
+                    existing?.name?.takeIf { it.isNotBlank() } ?: "抖音主播"
+                }
+
                 val maxAddedAt = repository.getAllChannels().maxOfOrNull { it.addedAt } ?: 0L
                 val newChannel = LiveChannel(
                     rid = rid,
-                    name = info?.name?.ifEmpty { "抖音主播" } ?: existing?.name ?: "抖音主播",
+                    name = resolvedName,
                     title = info?.title ?: existing?.title ?: "",
                     avatar = info?.avatar ?: existing?.avatar ?: "",
                     isLive = info?.isLive ?: existing?.isLive ?: false,
@@ -653,6 +696,14 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
             if (changedChannels.isNotEmpty()) {
                 repository.insertAll(changedChannels)
             }
+
+            // 首次载入在线策略优化：若冷启动阶段当前频道未开播且用户尚未手动干预，自动接力切至首个探活确认在线的频道
+            if (!hasUserInteracted && (_uiState.value.playbackStatus is PlaybackStatus.Offline || _uiState.value.playbackStatus is PlaybackStatus.Error)) {
+                val liveCandidate = repository.getAllChannels().firstOrNull { it.isLive }
+                if (liveCandidate != null && liveCandidate.rid != _uiState.value.activeChannel?.rid) {
+                    playChannel(liveCandidate, forceRefresh = false, isUserInitiated = false)
+                }
+            }
         } catch (_: Exception) {
         } finally {
             _uiState.update { it.copy(isProbing = false) }
@@ -776,8 +827,14 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
                     val rid = item.optString("rid").ifEmpty { item.optString("id") }
                     if (rid.isNotEmpty() && rid.matches(Regex("\\d{3,22}"))) {
                         val rawName = item.optString("name").trim()
-                        val name = if (rawName.isNotEmpty() && !isPlaceholderName(rawName, rid)) rawName else "抖音主播"
                         val rawTitle = item.optString("title").trim()
+                        val name = if (rawName.isNotEmpty() && !isPlaceholderName(rawName, rid)) {
+                            rawName
+                        } else if (rawTitle.isNotEmpty() && !isPlaceholderTitle(rawTitle)) {
+                            rawTitle
+                        } else {
+                            "抖音主播"
+                        }
                         val title = if (rawTitle.isNotEmpty() && !isPlaceholderTitle(rawTitle)) rawTitle else "已导入频道"
                         val avatar = item.optString("avatar", "")
                         val isLive = item.optBoolean("isLive", false)
@@ -811,8 +868,14 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
             if (m != null) {
                 val rid = m.value
                 val rawName = if (parts.size > 1) parts[1].trim() else ""
-                val name = if (rawName.isNotEmpty() && !isPlaceholderName(rawName, rid)) rawName else "抖音主播"
                 val rawTitle = if (parts.size > 2) parts[2].trim() else ""
+                val name = if (rawName.isNotEmpty() && !isPlaceholderName(rawName, rid)) {
+                    rawName
+                } else if (rawTitle.isNotEmpty() && !isPlaceholderTitle(rawTitle)) {
+                    rawTitle
+                } else {
+                    "抖音主播"
+                }
                 val title = if (rawTitle.isNotEmpty() && !isPlaceholderTitle(rawTitle)) rawTitle else "已导入频道"
                 result.add(
                     LiveChannel(

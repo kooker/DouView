@@ -438,6 +438,43 @@ class ExampleRobolectricTest {
     assertEquals("主播暂未开播", subTextOffline)
     assertFalse(subTextOffline.contains(rid))
   }
+
+  @Test
+  fun `test channel preserves custom anchor name like 茉莉·molly without replacing with 抖音主播`() {
+    val rid = "171612155041"
+    val channelWithRealName = com.example.data.LiveChannel(
+      rid = rid,
+      name = "茉莉·molly",
+      title = "迷人的笑脸吸引视线",
+      avatar = "https://p26.douyinpic.com/aweme/100x100/aweme-avatar/tos-cn-avt-0015_df08a01fd3fae937ff5631fc9ec1a361.jpeg",
+      isLive = true,
+      statusKnown = true
+    )
+
+    val displayName = if (channelWithRealName.name.isNotBlank() && channelWithRealName.name != channelWithRealName.rid && !channelWithRealName.name.matches(Regex("^(?:频道|房间)\\s*\\d{3,22}$"))) {
+      channelWithRealName.name
+    } else if (channelWithRealName.title.isNotBlank() && !channelWithRealName.title.matches(Regex("^(?:房间号?|频道)\\s*[:：]?\\s*\\d+.*$"))) {
+      channelWithRealName.title
+    } else {
+      channelWithRealName.name.ifBlank { "抖音主播" }
+    }
+
+    // Must be strictly "茉莉·molly", not "抖音主播"
+    assertEquals("茉莉·molly", displayName)
+    assertFalse(displayName == "抖音主播")
+    assertFalse(displayName.contains(rid))
+
+    val subText = when {
+      channelWithRealName.title.isNotEmpty() && !channelWithRealName.title.matches(Regex("^(?:房间号?|频道)\\s*[:：]?\\s*\\d+.*$")) -> channelWithRealName.title
+      channelWithRealName.isLive -> "实况直播中"
+      !channelWithRealName.statusKnown -> "正在核验开播状态..."
+      else -> "主播暂未开播"
+    }
+    // Must be "迷人的笑脸吸引视线"
+    assertEquals("迷人的笑脸吸引视线", subText)
+    assertFalse(subText.contains(rid))
+    assertFalse(subText.contains("房间号"))
+  }
 }
 
 

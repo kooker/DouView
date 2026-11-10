@@ -1032,9 +1032,13 @@ private fun BannerHeader(
             Spacer(modifier = Modifier.width(10.dp))
 
             // 名称与标题
-            val bannerDisplayName = activeChannel?.name?.let {
-                if (it.isBlank() || it.matches(Regex("^(?:频道|房间)\\s*\\d{3,22}$")) || it == activeChannel.rid) "抖音主播" else it
-            } ?: "请选择直播间"
+            val bannerDisplayName = if (activeChannel?.name?.isNotBlank() == true && activeChannel.name != activeChannel.rid && !activeChannel.name.matches(Regex("^(?:频道|房间)\\s*\\d{3,22}$"))) {
+                activeChannel.name
+            } else if (activeChannel?.title?.isNotBlank() == true && !activeChannel.title.matches(Regex("^(?:房间号?|频道)\\s*[:：]?\\s*\\d+.*$"))) {
+                activeChannel.title
+            } else {
+                activeChannel?.name?.ifBlank { "请选择直播间" } ?: "请选择直播间"
+            }
             val bannerSubText = when {
                 activeChannel == null -> "从下方列表中点击频道开始播放"
                 activeChannel.title.isNotEmpty() && !activeChannel.title.matches(Regex("^(?:房间号?|频道)\\s*[:：]?\\s*\\d+.*$")) -> activeChannel.title

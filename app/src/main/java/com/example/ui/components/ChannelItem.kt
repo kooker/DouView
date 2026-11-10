@@ -158,12 +158,12 @@ fun ChannelItem(
             Column(
                 modifier = Modifier.weight(1f)
             ) {
-                val displayName = channel.name.let { raw ->
-                    if (raw.isBlank() || raw.matches(Regex("^(?:频道|房间)\\s*\\d{3,22}$")) || raw == channel.rid) {
-                        "抖音主播"
-                    } else {
-                        raw
-                    }
+                val displayName = if (channel.name.isNotBlank() && channel.name != channel.rid && !channel.name.matches(Regex("^(?:频道|房间)\\s*\\d{3,22}$"))) {
+                    channel.name
+                } else if (channel.title.isNotBlank() && !channel.title.matches(Regex("^(?:房间号?|频道)\\s*[:：]?\\s*\\d+.*$"))) {
+                    channel.title
+                } else {
+                    channel.name.ifBlank { "抖音主播" }
                 }
                 Row(
                     verticalAlignment = Alignment.CenterVertically
