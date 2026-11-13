@@ -19,7 +19,9 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.focusable
+import androidx.compose.foundation.focusGroup
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -129,6 +131,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -172,6 +175,17 @@ fun LiveWorkbenchScreen(
         @Suppress("DEPRECATION")
         val hasTv = context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_TELEVISION)
         isUiModeTv || hasLeanback || hasTv
+    }
+    val playerStageFocusRequester = remember { FocusRequester() }
+
+    // TV 端初始化与弹窗/全屏退出后的安全焦点恢复（防止 FocusRequester 未挂载导致异常）
+    LaunchedEffect(isTv, isFullscreen, isInPictureInPictureMode, uiState.activeDialog) {
+        if (isTv && !isFullscreen && !isInPictureInPictureMode && uiState.activeDialog == null) {
+            kotlinx.coroutines.delay(60L)
+            try {
+                playerStageFocusRequester.requestFocus()
+            } catch (_: Exception) {}
+        }
     }
 
     // 本地文件选择器（TXT / CSV / JSON 文件导入）
@@ -583,7 +597,9 @@ fun LiveWorkbenchScreen(
                 exit = fadeOut() + scaleOut(),
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = if (showControls) 84.dp else 24.dp)
+                    .padding(
+                        bottom = if (showControls) (if (isTv) 92.dp else 84.dp) else TvSafeArea.fullscreenBottomHint(isTv)
+                    )
             ) {
                 Surface(
                     onClick = resetZoomSmoothly,
@@ -631,7 +647,10 @@ fun LiveWorkbenchScreen(
                                 colors = listOf(Color(0xCC000000), Color.Transparent)
                             )
                         )
-                        .padding(horizontal = 16.dp, vertical = 20.dp)
+                        .padding(
+                            horizontal = TvSafeArea.fullscreenHudHorizontal(isTv),
+                            vertical = TvSafeArea.fullscreenHudVertical(isTv)
+                        )
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -687,30 +706,37 @@ fun LiveWorkbenchScreen(
                             Spacer(modifier = Modifier.width(8.dp))
                         }
 
+                        var isExitFsFocused by remember { mutableStateOf(false) }
                         IconButton(
                             onClick = {
                                 viewModel.setFullscreen(false)
                                 activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
                             },
                             modifier = Modifier
-                                .size(36.dp)
-                                .background(Color(0x66000000), CircleShape)
+                                .size(if (isTv) 44.dp else 36.dp)
+                                .onFocusChanged { isExitFsFocused = it.isFocused }
+                                .background(if (isExitFsFocused) Color(0x4400D26A) else Color(0x66000000), CircleShape)
+                                .border(if (isExitFsFocused) 2.dp else 0.dp, Color(0xFF00D26A), CircleShape)
                                 .testTag("btn_exit_fullscreen")
                         ) {
-                            Icon(Icons.Default.FullscreenExit, contentDescription = "退出全屏", tint = Color.White)
+                            Icon(
+                                Icons.Default.FullscreenExit,
+                                contentDescription = "退出全屏",
+                                tint = if (isExitFsFocused) Color(0xFF00D26A) else Color.White
+                            )
                         }
                     }
                 }
             }
 
-            // 底部操作与换台提示（仅在控制栏激活且未放大时呈现）
+            // 底部操作与换台提示（仅在控制栏激活且未放大时呈现，遵循 TV 过扫描安全边距）
             AnimatedVisibility(
                 visible = showControls && zoomScale <= 1.05f,
                 enter = fadeIn(),
                 exit = fadeOut(),
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = 24.dp)
+                    .padding(bottom = TvSafeArea.fullscreenBottomHint(isTv))
             ) {
                 Box(
                     modifier = Modifier
@@ -743,14 +769,22 @@ fun LiveWorkbenchScreen(
             val isWideScreen = maxWidth >= 720.dp
 
             if (isWideScreen) {
-                // 平板 / 电视 / 横屏宽屏自适应双栏布局
-                Row(modifier = Modifier.fillMaxSize().padding(12.dp)) {
+                // 平板 / 电视 / 横屏宽屏自适应双栏布局（电视端自动应用 Overscan 安全边距防止边缘裁切）
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(
+                            horizontal = TvSafeArea.workbenchHorizontal(isTv),
+                            vertical = TvSafeArea.workbenchVertical(isTv)
+                        )
+                ) {
                     // 左侧：播放器与控制区
                     Column(
                         modifier = Modifier
                             .weight(1.3f)
                             .fillMaxHeight()
                             .padding(end = 12.dp)
+                            .focusGroup()
                     ) {
                         BannerHeader(
                             activeChannel = uiState.activeChannel,
@@ -760,20 +794,20 @@ fun LiveWorkbenchScreen(
                             isProbing = uiState.isProbing
                         )
                         Spacer(modifier = Modifier.height(8.dp))
-                        // 视频播放舞台 (宽屏 / 电视大屏) - 支持遥控器焦点感知与按OK/点击直接全屏
+                        // 视频播放舞台 (宽屏 / 电视大屏) - 支持遥控器单层精准焦点与按OK/点击直接全屏
                         var isPlayerFocused by remember { mutableStateOf(false) }
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .aspectRatio(16f / 9f)
                                 .clip(RoundedCornerShape(12.dp))
-                                .onFocusChanged { isPlayerFocused = it.isFocused }
                                 .border(
                                     if (isPlayerFocused) 2.dp else 1.dp,
                                     if (isPlayerFocused) Color(0xFF00D26A) else StudioBorder,
                                     RoundedCornerShape(12.dp)
                                 )
-                                .focusable()
+                                .focusRequester(playerStageFocusRequester)
+                                .onFocusChanged { isPlayerFocused = it.isFocused }
                                 .clickable { viewModel.setFullscreen(true) }
                         ) {
                             LivePlayerView(
@@ -838,6 +872,7 @@ fun LiveWorkbenchScreen(
                             .background(StudioCard, RoundedCornerShape(12.dp))
                             .border(1.dp, StudioBorder, RoundedCornerShape(12.dp))
                             .padding(12.dp)
+                            .focusGroup()
                     ) {
                         PlaylistHeader(
                             channelCount = uiState.channels.size,
@@ -886,12 +921,20 @@ fun LiveWorkbenchScreen(
 
                     Spacer(modifier = Modifier.height(6.dp))
 
-                    // 视频播放舞台 (固定 16:9) - 支持点击直接全屏
+                    // 视频播放舞台 (固定 16:9) - 支持点击与焦点直接全屏
+                    var isCompactPlayerFocused by remember { mutableStateOf(false) }
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .aspectRatio(16f / 9f)
                             .clip(RoundedCornerShape(10.dp))
+                            .border(
+                                if (isCompactPlayerFocused) 2.dp else 0.dp,
+                                Color(0xFF00D26A),
+                                RoundedCornerShape(10.dp)
+                            )
+                            .focusRequester(playerStageFocusRequester)
+                            .onFocusChanged { isCompactPlayerFocused = it.isFocused }
                             .clickable { viewModel.setFullscreen(true) }
                     ) {
                         LivePlayerView(
@@ -1064,50 +1107,71 @@ private fun BannerHeader(
                 )
             }
 
-            // 检查版本更新
-            IconButton(
-                onClick = onCheckUpdate,
-                modifier = Modifier.size(36.dp).testTag("btn_check_update")
-            ) {
-                Icon(
-                    imageVector = Icons.Default.SystemUpdate,
-                    contentDescription = "检查更新",
-                    tint = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
-
-            // 说明按钮
-            IconButton(
-                onClick = onShowGuide,
-                modifier = Modifier.size(36.dp).testTag("btn_user_guide")
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.HelpOutline,
-                    contentDescription = "使用说明",
-                    tint = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.size(19.dp)
-                )
-            }
-
-            // 探活与刷新按钮
-            IconButton(
-                onClick = onRefresh,
-                modifier = Modifier.size(36.dp).testTag("btn_refresh_stream")
-            ) {
-                if (isProbing) {
-                    CircularProgressIndicator(
-                        strokeWidth = 2.dp,
-                        color = DouyinRed,
-                        modifier = Modifier.size(16.dp)
-                    )
-                } else {
+            val tvGreen = Color(0xFF00D26A)
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.focusGroup()) {
+                // 检查版本更新
+                var isUpdateFocused by remember { mutableStateOf(false) }
+                IconButton(
+                    onClick = onCheckUpdate,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .onFocusChanged { isUpdateFocused = it.isFocused }
+                        .background(if (isUpdateFocused) Color(0x3300D26A) else Color.Transparent, CircleShape)
+                        .border(if (isUpdateFocused) 2.dp else 0.dp, tvGreen, CircleShape)
+                        .testTag("btn_check_update")
+                ) {
                     Icon(
-                        imageVector = Icons.Default.Refresh,
-                        contentDescription = "刷新",
-                        tint = MaterialTheme.colorScheme.onSurface,
+                        imageVector = Icons.Default.SystemUpdate,
+                        contentDescription = "检查更新",
+                        tint = if (isUpdateFocused) tvGreen else MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                // 说明按钮
+                var isGuideFocused by remember { mutableStateOf(false) }
+                IconButton(
+                    onClick = onShowGuide,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .onFocusChanged { isGuideFocused = it.isFocused }
+                        .background(if (isGuideFocused) Color(0x3300D26A) else Color.Transparent, CircleShape)
+                        .border(if (isGuideFocused) 2.dp else 0.dp, tvGreen, CircleShape)
+                        .testTag("btn_user_guide")
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.HelpOutline,
+                        contentDescription = "使用说明",
+                        tint = if (isGuideFocused) tvGreen else MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.size(19.dp)
                     )
+                }
+
+                // 探活与刷新按钮
+                var isRefreshFocused by remember { mutableStateOf(false) }
+                IconButton(
+                    onClick = onRefresh,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .onFocusChanged { isRefreshFocused = it.isFocused }
+                        .background(if (isRefreshFocused) Color(0x3300D26A) else Color.Transparent, CircleShape)
+                        .border(if (isRefreshFocused) 2.dp else 0.dp, tvGreen, CircleShape)
+                        .testTag("btn_refresh_stream")
+                ) {
+                    if (isProbing) {
+                        CircularProgressIndicator(
+                            strokeWidth = 2.dp,
+                            color = DouyinRed,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "刷新",
+                            tint = if (isRefreshFocused) tvGreen else MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.size(19.dp)
+                        )
+                    }
                 }
             }
         }
@@ -1142,10 +1206,12 @@ private fun ControlsRow(
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+            modifier = Modifier
+                .padding(horizontal = 8.dp, vertical = 4.dp)
+                .focusGroup()
         ) {
             // 协议切换 (HLS / FLV) - 选中与焦点状态采用绿色高亮 (适配电视遥控器)
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.focusGroup()) {
                 var isHlsFocused by remember { mutableStateOf(false) }
                 var isFlvFocused by remember { mutableStateOf(false) }
 
@@ -1245,12 +1311,19 @@ private fun ControlsRow(
             }
 
             // 操作集合：连续音量调节/静音、画中画、全屏
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.focusGroup()) {
                 Box {
+                    var isVolumeSliderTriggerFocused by remember { mutableStateOf(false) }
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
+                            .border(
+                                if (isVolumeSliderTriggerFocused) 1.5.dp else 0.dp,
+                                greenAccent,
+                                RoundedCornerShape(8.dp)
+                            )
+                            .onFocusChanged { isVolumeSliderTriggerFocused = it.isFocused }
                             .clickable { isVolumeDropdownOpen = true }
                             .padding(end = 4.dp)
                     ) {
@@ -1348,14 +1421,20 @@ private fun ControlsRow(
                     }
                 }
 
+                var isPipFocused by remember { mutableStateOf(false) }
                 IconButton(
                     onClick = onPipClick,
-                    modifier = Modifier.size(34.dp).testTag("btn_pip")
+                    modifier = Modifier
+                        .size(34.dp)
+                        .onFocusChanged { isPipFocused = it.isFocused }
+                        .background(if (isPipFocused) Color(0x3300D26A) else Color.Transparent, CircleShape)
+                        .border(if (isPipFocused) 2.dp else 0.dp, greenAccent, CircleShape)
+                        .testTag("btn_pip")
                 ) {
                     Icon(
                         imageVector = Icons.Default.PictureInPicture,
                         contentDescription = "画中画",
-                        tint = MaterialTheme.colorScheme.onSurface,
+                        tint = if (isPipFocused) greenAccent else MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.size(18.dp)
                     )
                 }
@@ -1423,36 +1502,66 @@ private fun PlaylistHeader(
             }
         }
 
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.focusGroup()) {
+            var isRemoteFocused by remember { mutableStateOf(false) }
             IconButton(
                 onClick = onRemoteImport,
-                modifier = Modifier.size(32.dp).testTag("btn_header_remote_import")
+                modifier = Modifier
+                    .size(34.dp)
+                    .onFocusChanged { isRemoteFocused = it.isFocused }
+                    .background(if (isRemoteFocused) Color(0x3300D26A) else Color.Transparent, CircleShape)
+                    .border(if (isRemoteFocused) 2.dp else 0.dp, greenAccent, CircleShape)
+                    .testTag("btn_header_remote_import")
             ) {
-                Icon(Icons.Default.CloudDownload, contentDescription = "远程订阅", tint = StudioSub, modifier = Modifier.size(16.dp))
+                Icon(Icons.Default.CloudDownload, contentDescription = "远程订阅", tint = if (isRemoteFocused) greenAccent else StudioSub, modifier = Modifier.size(16.dp))
             }
+            var isLocalFocused by remember { mutableStateOf(false) }
             IconButton(
                 onClick = onLocalImport,
-                modifier = Modifier.size(32.dp).testTag("btn_header_local_import")
+                modifier = Modifier
+                    .size(34.dp)
+                    .onFocusChanged { isLocalFocused = it.isFocused }
+                    .background(if (isLocalFocused) Color(0x3300D26A) else Color.Transparent, CircleShape)
+                    .border(if (isLocalFocused) 2.dp else 0.dp, greenAccent, CircleShape)
+                    .testTag("btn_header_local_import")
             ) {
-                Icon(Icons.Default.FileOpen, contentDescription = "本地导入", tint = StudioSub, modifier = Modifier.size(16.dp))
+                Icon(Icons.Default.FileOpen, contentDescription = "本地导入", tint = if (isLocalFocused) greenAccent else StudioSub, modifier = Modifier.size(16.dp))
             }
+            var isExportFocused by remember { mutableStateOf(false) }
             IconButton(
                 onClick = onExport,
-                modifier = Modifier.size(32.dp).testTag("btn_header_export")
+                modifier = Modifier
+                    .size(34.dp)
+                    .onFocusChanged { isExportFocused = it.isFocused }
+                    .background(if (isExportFocused) Color(0x3300D26A) else Color.Transparent, CircleShape)
+                    .border(if (isExportFocused) 2.dp else 0.dp, greenAccent, CircleShape)
+                    .testTag("btn_header_export")
             ) {
-                Icon(Icons.Default.FileDownload, contentDescription = "导出列表", tint = StudioSub, modifier = Modifier.size(16.dp))
+                Icon(Icons.Default.FileDownload, contentDescription = "导出列表", tint = if (isExportFocused) greenAccent else StudioSub, modifier = Modifier.size(16.dp))
             }
+            var isClearOfflineFocused by remember { mutableStateOf(false) }
             IconButton(
                 onClick = onClearOffline,
-                modifier = Modifier.size(32.dp).testTag("btn_header_clear_offline")
+                modifier = Modifier
+                    .size(34.dp)
+                    .onFocusChanged { isClearOfflineFocused = it.isFocused }
+                    .background(if (isClearOfflineFocused) Color(0x3300D26A) else Color.Transparent, CircleShape)
+                    .border(if (isClearOfflineFocused) 2.dp else 0.dp, greenAccent, CircleShape)
+                    .testTag("btn_header_clear_offline")
             ) {
-                Icon(Icons.Default.CleaningServices, contentDescription = "清理已下播", tint = StudioSub, modifier = Modifier.size(16.dp))
+                Icon(Icons.Default.CleaningServices, contentDescription = "清理已下播", tint = if (isClearOfflineFocused) greenAccent else StudioSub, modifier = Modifier.size(16.dp))
             }
+            var isClearCacheFocused by remember { mutableStateOf(false) }
             IconButton(
                 onClick = onClearCache,
-                modifier = Modifier.size(32.dp).testTag("btn_header_clear_cache")
+                modifier = Modifier
+                    .size(34.dp)
+                    .onFocusChanged { isClearCacheFocused = it.isFocused }
+                    .background(if (isClearCacheFocused) Color(0x3300D26A) else Color.Transparent, CircleShape)
+                    .border(if (isClearCacheFocused) 2.dp else 0.dp, greenAccent, CircleShape)
+                    .testTag("btn_header_clear_cache")
             ) {
-                Icon(Icons.Default.DeleteSweep, contentDescription = "清理缓存", tint = StudioSub, modifier = Modifier.size(16.dp))
+                Icon(Icons.Default.DeleteSweep, contentDescription = "清理缓存", tint = if (isClearCacheFocused) greenAccent else StudioSub, modifier = Modifier.size(16.dp))
             }
         }
     }
@@ -1467,7 +1576,9 @@ private fun AddChannelBar(
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .focusGroup()
     ) {
         OutlinedTextField(
             value = inputText,
@@ -1505,14 +1616,17 @@ private fun AddChannelBar(
 
         Spacer(modifier = Modifier.width(8.dp))
 
+        var isAddBtnFocused by remember { mutableStateOf(false) }
         Button(
             onClick = onAdd,
             enabled = inputText.isNotBlank() && !isBusy,
             colors = ButtonDefaults.buttonColors(containerColor = DouyinRed),
+            border = if (isAddBtnFocused) androidx.compose.foundation.BorderStroke(2.dp, Color(0xFF00D26A)) else null,
             shape = RoundedCornerShape(8.dp),
             contentPadding = PaddingValues(horizontal = 14.dp),
             modifier = Modifier
                 .height(46.dp)
+                .onFocusChanged { isAddBtnFocused = it.isFocused }
                 .testTag("btn_submit_add_channel")
         ) {
             if (isBusy) {
@@ -1549,7 +1663,10 @@ private fun ChannelListView(
     } else {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(6.dp),
-            modifier = Modifier.fillMaxSize().testTag("channels_lazy_column")
+            modifier = Modifier
+                .fillMaxSize()
+                .focusGroup()
+                .testTag("channels_lazy_column")
         ) {
             items(channels, key = { it.rid }) { channel ->
                 ChannelItem(
@@ -1561,4 +1678,12 @@ private fun ChannelListView(
             }
         }
     }
+}
+
+internal object TvSafeArea {
+    fun workbenchHorizontal(isTv: Boolean): Dp = if (isTv) 40.dp else 12.dp
+    fun workbenchVertical(isTv: Boolean): Dp = if (isTv) 22.dp else 12.dp
+    fun fullscreenHudHorizontal(isTv: Boolean): Dp = if (isTv) 48.dp else 16.dp
+    fun fullscreenHudVertical(isTv: Boolean): Dp = if (isTv) 28.dp else 20.dp
+    fun fullscreenBottomHint(isTv: Boolean): Dp = if (isTv) 32.dp else 24.dp
 }

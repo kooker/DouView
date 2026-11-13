@@ -626,7 +626,11 @@ object DouyinLiveEngine {
             .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DoumouLive/1.0")
             .build()
 
-        val res = httpClient.newCall(req).execute()
+        val res = try {
+            httpClient.newCall(req).execute()
+        } catch (e: java.net.UnknownServiceException) {
+            throw IllegalStateException("出于传输安全保护，远程订阅请使用 HTTPS 链接 (${e.message ?: "明文HTTP已禁用"})")
+        }
         if (!res.isSuccessful) {
             throw IllegalStateException("远程服务器响应错误，HTTP ${res.code}")
         }

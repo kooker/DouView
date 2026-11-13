@@ -4,6 +4,9 @@
     android:id="@+id/live_player_view"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:focusable="false"
+    android:focusableInTouchMode="false"
+    android:descendantFocusability="blocksDescendants"
     app:surface_type="texture_view"
     app:use_controller="false"
     app:shutter_background_color="@android:color/transparent" />

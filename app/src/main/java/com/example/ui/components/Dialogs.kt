@@ -282,7 +282,13 @@ fun AppDialogsHost(
                     ) {
                         Text("本地直播源订阅导入", fontSize = 16.sp, fontWeight = FontWeight.Bold)
                         OutlinedButton(
-                            onClick = { fileLauncher.launch("*/*") },
+                            onClick = {
+                                try {
+                                    fileLauncher.launch("*/*")
+                                } catch (_: Exception) {
+                                    onToast("当前设备未提供文件选择器，请直接粘贴文本或使用远程订阅")
+                                }
+                            },
                             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                             modifier = Modifier.height(30.dp)
                         ) {
@@ -473,13 +479,17 @@ fun AppDialogsHost(
                         Spacer(modifier = Modifier.width(8.dp))
                         Button(
                             onClick = {
-                                val sendIntent: Intent = Intent().apply {
-                                    action = Intent.ACTION_SEND
-                                    putExtra(Intent.EXTRA_TEXT, activeDialog.content)
-                                    type = "text/plain"
+                                try {
+                                    val sendIntent: Intent = Intent().apply {
+                                        action = Intent.ACTION_SEND
+                                        putExtra(Intent.EXTRA_TEXT, activeDialog.content)
+                                        type = "text/plain"
+                                    }
+                                    val shareIntent = Intent.createChooser(sendIntent, "分享导出文件: ${activeDialog.fileName}")
+                                    context.startActivity(shareIntent)
+                                } catch (_: Exception) {
+                                    onToast("当前设备不支持系统分享，请点击「复制内容」")
                                 }
-                                val shareIntent = Intent.createChooser(sendIntent, "分享导出文件: ${activeDialog.fileName}")
-                                context.startActivity(shareIntent)
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = DouyinRed),
                             modifier = Modifier.testTag("btn_share_export")
@@ -548,8 +558,14 @@ fun AppDialogsHost(
                 confirmButton = {
                     Button(
                         onClick = {
-                            val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(activeDialog.downloadUrl))
-                            context.startActivity(intent)
+                            try {
+                                val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(activeDialog.downloadUrl))
+                                context.startActivity(intent)
+                            } catch (_: Exception) {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                clipboard?.setPrimaryClip(ClipData.newPlainText("DouViewGitHub", activeDialog.downloadUrl))
+                                onToast("未检测到浏览器，已将 GitHub 仓库地址复制到剪贴板")
+                            }
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = DouyinRed),
                         modifier = Modifier.testTag("btn_version_download")
@@ -588,7 +604,7 @@ fun AppDialogsHost(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(stringResource(R.string.user_guide_title), fontSize = 15.sp, fontWeight = FontWeight.Bold)
                             }
-                            IconButton(onClick = onDismiss, modifier = Modifier.size(32.dp)) {
+                            IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp).testTag("btn_guide_close_x")) {
                                 Icon(Icons.Default.Close, contentDescription = "关闭", tint = Color.Gray)
                             }
                         }

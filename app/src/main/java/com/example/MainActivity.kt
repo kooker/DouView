@@ -213,7 +213,19 @@ class MainActivity : ComponentActivity() {
      * 工作台模式：双击返回键安全退出应用并清理后台任务；方向键与确认键保留给界面焦点导航；数字键 1-9 直达频道
      */
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        val isFullscreen = viewModel.uiState.value.isFullscreen
+        val state = viewModel.uiState.value
+        val isFullscreen = state.isFullscreen
+        val hasOpenDialog = state.activeDialog != null
+        val repeatCount = event?.repeatCount ?: 0
+
+        if (hasOpenDialog) {
+            return super.onKeyDown(keyCode, event)
+        }
+
+        if (TvKeyEventPolicy.shouldIgnoreRepeat(keyCode, repeatCount)) {
+            return true
+        }
+
         when (keyCode) {
             KeyEvent.KEYCODE_BACK -> {
                 if (isFullscreen) {
@@ -275,7 +287,7 @@ class MainActivity : ComponentActivity() {
             }
             in KeyEvent.KEYCODE_1..KeyEvent.KEYCODE_9 -> {
                 val targetIndex = keyCode - KeyEvent.KEYCODE_1
-                val channels = viewModel.uiState.value.channels
+                val channels = state.channels
                 if (targetIndex in channels.indices) {
                     val channel = channels[targetIndex]
                     viewModel.playChannel(channel)
@@ -312,7 +324,7 @@ class MainActivity : ComponentActivity() {
                 return true
             }
             KeyEvent.KEYCODE_PROG_GREEN -> {
-                val currentProtocol = viewModel.uiState.value.selectedProtocol
+                val currentProtocol = state.selectedProtocol
                 viewModel.changeProtocol(if (currentProtocol == "flv") "hls" else "flv")
                 return true
             }
@@ -333,11 +345,19 @@ class MainActivity : ComponentActivity() {
                 return super.onKeyDown(keyCode, event)
             }
             KeyEvent.KEYCODE_CHANNEL_UP, KeyEvent.KEYCODE_PAGE_UP -> {
-                viewModel.playNextChannel()
+                val now = System.currentTimeMillis()
+                if (now - lastChannelSwitchTime > 400L) {
+                    lastChannelSwitchTime = now
+                    viewModel.playNextChannel()
+                }
                 return true
             }
             KeyEvent.KEYCODE_CHANNEL_DOWN, KeyEvent.KEYCODE_PAGE_DOWN -> {
-                viewModel.playPreviousChannel()
+                val now = System.currentTimeMillis()
+                if (now - lastChannelSwitchTime > 400L) {
+                    lastChannelSwitchTime = now
+                    viewModel.playPreviousChannel()
+                }
                 return true
             }
             KeyEvent.KEYCODE_MUTE, KeyEvent.KEYCODE_VOLUME_MUTE -> {
@@ -354,5 +374,32 @@ class MainActivity : ComponentActivity() {
             }
         }
         return super.onKeyDown(keyCode, event)
+    }
+}
+
+internal object TvKeyEventPolicy {
+    fun shouldIgnoreRepeat(keyCode: Int, repeatCount: Int): Boolean {
+        if (repeatCount <= 0) return false
+        return when (keyCode) {
+            KeyEvent.KEYCODE_BACK,
+            KeyEvent.KEYCODE_DPAD_CENTER,
+            KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_NUMPAD_ENTER,
+            KeyEvent.KEYCODE_MUTE,
+            KeyEvent.KEYCODE_VOLUME_MUTE,
+            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+            KeyEvent.KEYCODE_MEDIA_PLAY,
+            KeyEvent.KEYCODE_MEDIA_PAUSE,
+            KeyEvent.KEYCODE_MEDIA_STOP,
+            KeyEvent.KEYCODE_INFO,
+            KeyEvent.KEYCODE_WINDOW,
+            KeyEvent.KEYCODE_MENU,
+            KeyEvent.KEYCODE_PROG_RED,
+            KeyEvent.KEYCODE_PROG_GREEN,
+            KeyEvent.KEYCODE_PROG_YELLOW,
+            KeyEvent.KEYCODE_PROG_BLUE,
+            in KeyEvent.KEYCODE_1..KeyEvent.KEYCODE_9 -> true
+            else -> false
+        }
     }
 }

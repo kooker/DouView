@@ -32,7 +32,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
@@ -85,8 +84,6 @@ fun ChannelItem(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(10.dp))
-            .onFocusChanged { isFocused = it.isFocused }
-            .focusable()
             .background(
                 if (isActive || isFocused) {
                     Brush.horizontalGradient(
@@ -106,6 +103,7 @@ fun ChannelItem(
                 color = if (isFocused) Color(0xFF00D26A) else if (isActive) DouyinRed else StudioBorder,
                 shape = RoundedCornerShape(10.dp)
             )
+            .onFocusChanged { isFocused = it.isFocused }
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 10.dp)
             .alpha(itemAlpha)
@@ -232,17 +230,21 @@ fun ChannelItem(
                 )
             }
 
-            // 删除按钮（48dp 最小触摸目标）
+            // 删除按钮（兼容遥控器绿色焦点环与触控目标）
+            var isDeleteFocused by remember { mutableStateOf(false) }
             IconButton(
                 onClick = onDelete,
                 modifier = Modifier
-                    .size(40.dp)
+                    .size(44.dp)
+                    .onFocusChanged { isDeleteFocused = it.isFocused }
+                    .background(if (isDeleteFocused) Color(0x3300D26A) else Color.Transparent, CircleShape)
+                    .border(if (isDeleteFocused) 2.dp else 0.dp, Color(0xFF00D26A), CircleShape)
                     .testTag("btn_delete_channel_${channel.rid}")
             ) {
                 Icon(
                     imageVector = Icons.Default.Close,
                     contentDescription = "删除频道",
-                    tint = Color(0xFF666677),
+                    tint = if (isDeleteFocused) Color(0xFF00D26A) else Color(0xFF7A7A8C),
                     modifier = Modifier.size(16.dp)
                 )
             }

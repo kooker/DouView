@@ -548,8 +548,72 @@ class ExampleRobolectricTest {
     vm.handlePlayerError(isDecoderError = true, errorMsg = "HEVC decoder unsupported")
     assertTrue(vm.uiState.value.playbackStatus is com.example.ui.PlaybackStatus.Error)
   }
+
+  @Test
+  fun `test manifest disables cleartext traffic attaches network security config and omits REQUEST_INSTALL_PACKAGES`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val pkgInfo = context.packageManager.getPackageInfo(
+      context.packageName,
+      android.content.pm.PackageManager.GET_PERMISSIONS
+    )
+    val appInfo = context.applicationInfo
+
+    // usesCleartextTraffic must be false
+    assertEquals(0, appInfo.flags and android.content.pm.ApplicationInfo.FLAG_USES_CLEARTEXT_TRAFFIC)
+
+    // network_security_config XML resource must exist and parse cleanly
+    val xmlParser = context.resources.getXml(R.xml.network_security_config)
+    var foundBaseConfig = false
+    while (xmlParser.next() != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+      if (xmlParser.eventType == org.xmlpull.v1.XmlPullParser.START_TAG && xmlParser.name == "base-config") {
+        foundBaseConfig = true
+        assertEquals("false", xmlParser.getAttributeValue(null, "cleartextTrafficPermitted"))
+      }
+    }
+    assertTrue(foundBaseConfig)
+
+    // Prohibited permission REQUEST_INSTALL_PACKAGES must never be requested
+    val permissions = pkgInfo.requestedPermissions?.toList().orEmpty()
+    assertFalse(permissions.contains("android.permission.REQUEST_INSTALL_PACKAGES"))
+  }
+
+  @Test
+  fun `test manifest declares Leanback launcher banner and non-required TV features`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val pm = context.packageManager
+
+    val leanbackIntent = android.content.Intent(android.content.Intent.ACTION_MAIN).apply {
+      addCategory(android.content.Intent.CATEGORY_LEANBACK_LAUNCHER)
+      setPackage(context.packageName)
+    }
+    val resolved = pm.queryIntentActivities(leanbackIntent, 0)
+    assertTrue(resolved.isNotEmpty())
+    assertTrue(resolved.any { it.activityInfo.name == MainActivity::class.java.name })
+    assertTrue(context.applicationInfo.banner != 0)
+  }
+
+  @Test
+  fun `test TvSafeArea applies overscan safe insets on TV and compact padding on handheld`() {
+    assertTrue(com.example.ui.TvSafeArea.workbenchHorizontal(isTv = true).value >= 36f)
+    assertTrue(com.example.ui.TvSafeArea.workbenchVertical(isTv = true).value >= 20f)
+    assertTrue(com.example.ui.TvSafeArea.fullscreenHudHorizontal(isTv = true).value >= 44f)
+    assertTrue(com.example.ui.TvSafeArea.fullscreenHudVertical(isTv = true).value >= 24f)
+    assertTrue(com.example.ui.TvSafeArea.fullscreenBottomHint(isTv = true).value >= 28f)
+
+    assertEquals(12f, com.example.ui.TvSafeArea.workbenchHorizontal(isTv = false).value, 0.01f)
+    assertEquals(16f, com.example.ui.TvSafeArea.fullscreenHudHorizontal(isTv = false).value, 0.01f)
+  }
+
+  @Test
+  fun `test TvKeyEventPolicy prevents discrete toggle key repeat flickering while allowing continuous volume keys`() {
+    assertFalse(TvKeyEventPolicy.shouldIgnoreRepeat(android.view.KeyEvent.KEYCODE_DPAD_CENTER, repeatCount = 0))
+    assertTrue(TvKeyEventPolicy.shouldIgnoreRepeat(android.view.KeyEvent.KEYCODE_DPAD_CENTER, repeatCount = 1))
+    assertTrue(TvKeyEventPolicy.shouldIgnoreRepeat(android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, repeatCount = 2))
+    assertTrue(TvKeyEventPolicy.shouldIgnoreRepeat(android.view.KeyEvent.KEYCODE_BACK, repeatCount = 1))
+    assertTrue(TvKeyEventPolicy.shouldIgnoreRepeat(android.view.KeyEvent.KEYCODE_1, repeatCount = 1))
+
+    // Continuous volume/direction repeats must still work when user holds the button
+    assertFalse(TvKeyEventPolicy.shouldIgnoreRepeat(android.view.KeyEvent.KEYCODE_VOLUME_UP, repeatCount = 2))
+    assertFalse(TvKeyEventPolicy.shouldIgnoreRepeat(android.view.KeyEvent.KEYCODE_DPAD_RIGHT, repeatCount = 3))
+  }
 }
-
-
-
-

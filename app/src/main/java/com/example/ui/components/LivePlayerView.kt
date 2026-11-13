@@ -70,6 +70,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.Surface
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -593,6 +594,9 @@ fun LivePlayerView(
                 (LayoutInflater.from(ctx).inflate(R.layout.view_live_player, null) as PlayerView).apply {
                     player = exoPlayer
                     useController = false
+                    isFocusable = false
+                    isFocusableInTouchMode = false
+                    descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
                     setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
                     setBackgroundColor(android.graphics.Color.TRANSPARENT)
                     resizeMode = if (isPiPMode) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT
@@ -752,11 +756,15 @@ fun LivePlayerView(
                                 textAlign = TextAlign.Center
                             )
                             Spacer(modifier = Modifier.height(12.dp))
+                            var isRetryFocused by remember { mutableStateOf(false) }
                             Button(
                                 onClick = onRetry,
                                 colors = ButtonDefaults.buttonColors(containerColor = DouyinRed),
+                                border = if (isRetryFocused) BorderStroke(2.dp, Color(0xFF00D26A)) else null,
                                 shape = RoundedCornerShape(20.dp),
-                                modifier = Modifier.testTag("btn_player_retry")
+                                modifier = Modifier
+                                    .onFocusChanged { isRetryFocused = it.isFocused }
+                                    .testTag("btn_player_retry")
                             ) {
                                 Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(modifier = Modifier.size(6.dp))
