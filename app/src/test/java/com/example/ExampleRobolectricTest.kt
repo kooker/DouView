@@ -475,6 +475,79 @@ class ExampleRobolectricTest {
     assertFalse(subText.contains(rid))
     assertFalse(subText.contains("房间号"))
   }
+
+  @Test
+  fun `test ViewModel conservative quality selection puts hd and sd first and origin last`() {
+    val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+    val vm = com.example.ui.LiveWorkbenchViewModel(app)
+
+    val streamsNoHd = mapOf(
+      "origin" to com.example.engine.QualityStream("原画", "http://flv/origin", "http://hls/origin"),
+      "uhd" to com.example.engine.QualityStream("超清", "http://flv/uhd", "http://hls/uhd"),
+      "sd" to com.example.engine.QualityStream("标清", "http://flv/sd", "http://hls/sd")
+    )
+    // Preferred is "hd" which is missing; conservative selection must choose "sd" instead of "uhd" or "origin"
+    assertEquals("sd", vm.selectConservativeQualityForTest(streamsNoHd, "hd"))
+
+    val originOnly = mapOf(
+      "origin" to com.example.engine.QualityStream("原画", "http://flv/origin", "http://hls/origin")
+    )
+    assertEquals("origin", vm.selectConservativeQualityForTest(originOnly, "hd"))
+  }
+
+  @Test
+  fun `test ViewModel handlePlayerError cascades 3 downgrades and falls back protocol HLS to FLV before surfacing error`() = runBlocking {
+    val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+    val vm = com.example.ui.LiveWorkbenchViewModel(app)
+
+    val streamData = com.example.engine.LiveStreamData(
+      rid = "171612155041",
+      isLive = true,
+      statusKnown = true,
+      name = "茉莉·molly",
+      title = "迷人的笑脸吸引视线",
+      avatar = "",
+      streams = mapOf(
+        "origin" to com.example.engine.QualityStream("原画 (1080P60)", "http://flv/origin", "http://hls/origin"),
+        "uhd" to com.example.engine.QualityStream("超清 (1080P)", "http://flv/uhd", "http://hls/uhd"),
+        "hd" to com.example.engine.QualityStream("高清 (720P)", "http://flv/hd", "http://hls/hd"),
+        "sd" to com.example.engine.QualityStream("标清 (540P)", "http://flv/sd", "http://hls/sd")
+      )
+    )
+
+    // Start at uhd on hls
+    vm.seedPlaybackForTest(streamData, selectedQuality = "uhd", selectedProtocol = "hls")
+
+    // 1st error (decoder error): uhd -> hd
+    vm.handlePlayerError(isDecoderError = true, errorMsg = "MediaCodec configure failed")
+    assertEquals("hd", vm.uiState.value.selectedQuality)
+    assertEquals("http://hls/hd", vm.uiState.value.playbackUrl)
+    assertTrue(vm.uiState.value.playbackStatus is com.example.ui.PlaybackStatus.Playing)
+
+    // Wait > 800ms cooldown for explicit error recovery
+    kotlinx.coroutines.delay(850L)
+
+    // 2nd error (non-decoder persistent error): permissive handling still downgrades hd -> sd
+    vm.handlePlayerError(isDecoderError = false, errorMsg = "Render stalled")
+    assertEquals("sd", vm.uiState.value.selectedQuality)
+    assertEquals("http://hls/sd", vm.uiState.value.playbackUrl)
+    assertTrue(vm.uiState.value.playbackStatus is com.example.ui.PlaybackStatus.Playing)
+
+    kotlinx.coroutines.delay(850L)
+
+    // 3rd error at lowest quality "sd": no lower quality -> switches protocol HLS -> FLV
+    vm.handlePlayerError(isDecoderError = true, errorMsg = "HEVC decoder unsupported")
+    assertEquals("sd", vm.uiState.value.selectedQuality)
+    assertEquals("flv", vm.uiState.value.selectedProtocol)
+    assertEquals("http://flv/sd", vm.uiState.value.playbackUrl)
+    assertTrue(vm.uiState.value.playbackStatus is com.example.ui.PlaybackStatus.Playing)
+
+    kotlinx.coroutines.delay(850L)
+
+    // 4th error after 3 attempts exhausted -> now surfaces Error state for manual retry
+    vm.handlePlayerError(isDecoderError = true, errorMsg = "HEVC decoder unsupported")
+    assertTrue(vm.uiState.value.playbackStatus is com.example.ui.PlaybackStatus.Error)
+  }
 }
 
 

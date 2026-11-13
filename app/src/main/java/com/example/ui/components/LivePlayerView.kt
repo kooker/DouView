@@ -52,6 +52,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -138,6 +139,13 @@ fun LivePlayerView(
     var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
     val isPlaying = playbackStatus is PlaybackStatus.Playing
 
+    // 使用 rememberUpdatedState 防止 ExoPlayer / Lifecycle 长寿命监听器捕获过时闭包
+    val currentIsScreenOffAudio by rememberUpdatedState(isScreenOffAudioMode)
+    val currentOnPlaybackStateChanged by rememberUpdatedState(onPlaybackStateChanged)
+    val currentOnPlayerError by rememberUpdatedState(onPlayerErrorOccurred)
+    val currentOnBlackScreen by rememberUpdatedState(onBlackScreenDetected)
+    val currentOnAspectRatio by rememberUpdatedState(onVideoAspectRatioChanged)
+
     // 创建配置解码器自动降级、低延时快速缓冲与防跨域/Referer 拦截的 ExoPlayer 实例
     val exoPlayer = remember {
         val renderersFactory = DefaultRenderersFactory(context)
@@ -198,7 +206,7 @@ fun LivePlayerView(
                 Lifecycle.Event.ON_START -> {
                     isLifecycleBackground = false
                     try {
-                        if (!isScreenOffAudioMode) {
+                        if (!currentIsScreenOffAudio) {
                             exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
                                 .buildUpon()
                                 .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, false)
@@ -221,15 +229,11 @@ fun LivePlayerView(
             override fun onEvents(player: Player, events: Player.Events) {
                 if (events.contains(Player.EVENT_RENDERED_FIRST_FRAME) ||
                     events.contains(Player.EVENT_VIDEO_SIZE_CHANGED) ||
-                    events.contains(Player.EVENT_IS_PLAYING_CHANGED) ||
                     events.contains(Player.EVENT_PLAYBACK_STATE_CHANGED)
                 ) {
                     if (player.videoSize.width > 0 && player.videoSize.height > 0) {
                         hasRenderedFirstFrame = true
                         isAudioOnly = false // 侦测到视频尺寸，坚决消除语音直播误判
-                    }
-                    if (player.isPlaying && player.playbackState == Player.STATE_READY) {
-                        hasRenderedFirstFrame = true
                     }
                 }
             }
@@ -244,7 +248,7 @@ fun LivePlayerView(
                 // 关键军工级防误判：
                 // 仅当媒体流中「完全不存在任何视频轨道」且「存在音频轨道」且「非人工息屏/后台纯音频模式」时，
                 // 才是真正的纯音频电台直播间！若流中本就存在视频轨，绝不误标记为语音电台！
-                if (!hasVideoTrackInStream && hasAudioTrackInStream && !isScreenOffAudioMode && !isLifecycleBackground) {
+                if (!hasVideoTrackInStream && hasAudioTrackInStream && !currentIsScreenOffAudio && !isLifecycleBackground) {
                     isAudioOnly = true
                     hasRenderedFirstFrame = true
                 } else if (hasVideoTrackInStream) {
@@ -260,17 +264,17 @@ fun LivePlayerView(
             override fun onPlaybackStateChanged(state: Int) {
                 when (state) {
                     Player.STATE_BUFFERING -> {
-                        onPlaybackStateChanged(PlaybackStatus.Buffering("正在加速缓冲流媒体..."))
+                        currentOnPlaybackStateChanged(PlaybackStatus.Buffering("正在加速缓冲流媒体..."))
                     }
                     Player.STATE_READY -> {
                         autoRetryCount = 0
-                        onPlaybackStateChanged(PlaybackStatus.Playing)
+                        currentOnPlaybackStateChanged(PlaybackStatus.Playing)
                         if (exoPlayer.videoSize.width > 0 && exoPlayer.videoSize.height > 0) {
                             hasRenderedFirstFrame = true
                         }
                     }
                     Player.STATE_ENDED -> {
-                        onPlaybackStateChanged(PlaybackStatus.Offline("直播信号已结束"))
+                        currentOnPlaybackStateChanged(PlaybackStatus.Offline("直播信号已结束"))
                     }
                     Player.STATE_IDLE -> {}
                 }
@@ -278,7 +282,7 @@ fun LivePlayerView(
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 if (isPlaying) {
-                    onPlaybackStateChanged(PlaybackStatus.Playing)
+                    currentOnPlaybackStateChanged(PlaybackStatus.Playing)
                     if (exoPlayer.videoSize.width > 0 && exoPlayer.videoSize.height > 0) {
                         hasRenderedFirstFrame = true
                     }
@@ -289,7 +293,7 @@ fun LivePlayerView(
                 if (videoSize.width > 0 && videoSize.height > 0) {
                     val isPortrait = videoSize.height > videoSize.width
                     isPortraitStream = isPortrait
-                    onVideoAspectRatioChanged(isPortrait)
+                    currentOnAspectRatio(isPortrait)
                     hasRenderedFirstFrame = true // 视频轨道尺寸已成功解析，解码正常
                     isAudioOnly = false
                 }
@@ -304,25 +308,38 @@ fun LivePlayerView(
                     return
                 }
 
-                // 2. 识别解码异常（硬件能力受限或格式不符）
-                val isDecoderError = error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
+                // 2. 扩大解码器 / MediaCodec 异常识别范围（涵盖低端盒子的硬解能力超限、10bit/HEVC 回落异常等）
+                val causeChainText = generateSequence<Throwable>(error) { it.cause }
+                    .take(5)
+                    .joinToString(" | ") { "${it.javaClass.simpleName}: ${it.message ?: ""}" }
+                    .lowercase()
+                val isDecoderError = error.errorCode in 4000..4999 ||
+                        error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
                         error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED ||
                         error.errorCode == PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED ||
+                        error.errorCode == PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES ||
+                        error.errorCode == PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED ||
+                        error.errorCode == PlaybackException.ERROR_CODE_VIDEO_FRAME_PROCESSOR_INIT_FAILED ||
+                        error.errorCode == PlaybackException.ERROR_CODE_VIDEO_FRAME_PROCESSING_FAILED ||
                         error.errorCodeName.contains("DECODER", ignoreCase = true) ||
-                        error.message?.contains("decoder", ignoreCase = true) == true ||
-                        error.message?.contains("MediaCodec", ignoreCase = true) == true ||
-                        error.cause?.javaClass?.simpleName?.contains("Decoder", ignoreCase = true) == true ||
-                        error.cause?.javaClass?.simpleName?.contains("Codec", ignoreCase = true) == true
+                        error.errorCodeName.contains("DECODING", ignoreCase = true) ||
+                        listOf(
+                            "decoder", "mediacodec", "codec", "decode",
+                            "configure failed", "exceeds_capabilities", "format_unsupported",
+                            "hevc", "h265", "video/hevc", "hdr", "color_format",
+                            "omx.", "c2.", "dequeue"
+                        ).any { causeChainText.contains(it) }
 
-                // 3. 网络信号抖动或非致命解码故障：息屏/后台纯音频模式下持久自愈重连，前台模式最多 2 次
-                val isInBackgroundAudio = isScreenOffAudioMode || isLifecycleBackground
+                // 3. 识别到解码故障时，坚决不再在同一清晰度上死磕重试，直接上抛触发自动降画质；
+                //    仅非解码类的网络抖动执行同档短暂自愈，息屏/后台纯音频模式下持续守护重连
+                val isInBackgroundAudio = currentIsScreenOffAudio || isLifecycleBackground
                 if (!isDecoderError && (autoRetryCount < 2 || isInBackgroundAudio)) {
                     if (!isInBackgroundAudio) {
                         autoRetryCount++
-                        onPlaybackStateChanged(PlaybackStatus.Buffering("信号波动，自愈重试 ($autoRetryCount/2)..."))
+                        currentOnPlaybackStateChanged(PlaybackStatus.Buffering("信号波动，自愈重试 ($autoRetryCount/2)..."))
                     } else {
                         // 息屏/后台模式持续守护保持拉流，杜绝因基站切换或短暂掉包发生永久断流
-                        onPlaybackStateChanged(PlaybackStatus.Buffering("后台流媒体自愈保持中..."))
+                        currentOnPlaybackStateChanged(PlaybackStatus.Buffering("后台流媒体自愈保持中..."))
                     }
                     exoPlayer.seekToDefaultPosition()
                     exoPlayer.prepare()
@@ -330,7 +347,7 @@ fun LivePlayerView(
                     return
                 }
 
-                onPlayerErrorOccurred(isDecoderError, error.message ?: "解码异常")
+                currentOnPlayerError(isDecoderError, error.message ?: "解码异常")
             }
         }
         exoPlayer.addListener(listener)
@@ -356,12 +373,12 @@ fun LivePlayerView(
         } catch (_: Exception) {}
     }
 
-    // 毫秒级多维出帧高频侦测守护，确保一旦底层解码输出画面，0 毫秒消除遮罩，彻底杜绝转圈残留
+    // 毫秒级多维出帧高频侦测守护，确保一旦底层真正输出视频画面（videoSize > 0）才消除黑屏标记，避免被纯音频时钟推进误导
     LaunchedEffect(playbackUrl, isPlaying) {
         if (playbackUrl.isNullOrEmpty()) return@LaunchedEffect
         while (isActive) {
             val isPlaybackActive = exoPlayer.isPlaying || exoPlayer.playbackState == Player.STATE_READY
-            val hasVideoOutput = (exoPlayer.videoSize.width > 0 && exoPlayer.videoSize.height > 0) || exoPlayer.currentPosition > 0 || isAudioOnly
+            val hasVideoOutput = (exoPlayer.videoSize.width > 0 && exoPlayer.videoSize.height > 0) || isAudioOnly
             if (isPlaybackActive && hasVideoOutput) {
                 hasRenderedFirstFrame = true
                 break
@@ -406,38 +423,52 @@ fun LivePlayerView(
         }
     }
 
-    // 黑屏但有声音 (Black Screen with Audio) 智能自愈看门狗：
-    // 只绑定 playbackUrl，绝不因 isPlaying / Buffering 瞬态重组打断！
+    // 黑屏但有声音 (Black Screen with Audio) 快速自愈看门狗：
+    // 1. 播放器已 READY / 在播，但连续 4 秒（8 个 500ms 周期）仍无视频尺寸 -> 立即触发自动降流
+    // 2. 长时间卡在缓冲约 8 秒（16 个 500ms 周期）未出画面 -> 触发自动降流
+    // 3. 息屏/后台纯音频模式下暂停计数，防止后台切流误伤
     LaunchedEffect(playbackUrl) {
         if (playbackUrl.isNullOrEmpty()) return@LaunchedEffect
-        var elapsedHalfSec = 0
+        var totalElapsedHalfSec = 0
+        var readyWithoutVideoHalfSec = 0
 
         while (isActive) {
             delay(500L)
-            elapsedHalfSec++
+            if (currentIsScreenOffAudio || isLifecycleBackground) {
+                continue
+            }
 
-            // 多维度智能核验视频是否已实际出帧并播放（解决底层回调滞后导致转圈遮挡与误降级）
+            // 严格校验 videoSize 宽高，杜绝“有声无画却因 READY/currentPosition>0 误判为已出帧”
             val hasVideoDecoded = exoPlayer.videoSize.width > 0 && exoPlayer.videoSize.height > 0
             val isPlaybackActive = exoPlayer.isPlaying || exoPlayer.playbackState == Player.STATE_READY
             if (hasVideoDecoded && isPlaybackActive) {
                 hasRenderedFirstFrame = true
             }
 
-            // 视频首帧渲染成功、视频尺寸已就绪或为纯音频电台直播，看门狗功成身退
+            // 视频首帧渲染成功或确认为纯音频电台直播，看门狗功成身退
             if (hasRenderedFirstFrame || isAudioOnly) {
                 break
             }
 
-            if (isPlaybackActive && !hasRenderedFirstFrame && !isAudioOnly) {
-                if (elapsedHalfSec >= 20) {
-                    // 已就绪超 10 秒画面未出，触发单向自适应降级自愈（仅单次生效并锁定稳定播放）
-                    onBlackScreenDetected()
+            totalElapsedHalfSec++
+            if (isPlaybackActive) {
+                readyWithoutVideoHalfSec++
+                if (readyWithoutVideoHalfSec >= 8) {
+                    // 已 READY / 在播连续约 4 秒仍无视频尺寸，立即自动降流
+                    currentOnBlackScreen()
                     break
                 }
-            } else if (elapsedHalfSec >= 28 && !hasRenderedFirstFrame && !isAudioOnly) {
-                // 完全卡死在缓冲 14 秒，触发一次自适应换源自愈
-                onBlackScreenDetected()
-                break
+                if (totalElapsedHalfSec >= 24) {
+                    currentOnBlackScreen()
+                    break
+                }
+            } else {
+                readyWithoutVideoHalfSec = 0
+                if (totalElapsedHalfSec >= 16) {
+                    // 长时间卡在缓冲约 8 秒未出帧，触发自动降流
+                    currentOnBlackScreen()
+                    break
+                }
             }
         }
     }

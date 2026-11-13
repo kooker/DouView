@@ -97,10 +97,11 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
     private var probeJob: Job? = null
     private var playToken = 0L
 
-    // 单频道会话级自适应降级管理：严格限制单次会话最多自适应自愈 1 次，自适应后立即锁定稳定播放，杜绝反复来回切换！
+    // 单频道会话级自适应降级管理：支持最多 3 次单向阶梯降流（3.5s 冷却）与 HLS<->FLV 协议兜底，防止黑屏死锁且绝不逆向回弹
     private var autoDegradeCount = 0
-    private val MAX_AUTO_DEGRADES_PER_CHANNEL = 1
+    private val MAX_AUTO_DEGRADES_PER_CHANNEL = 3
     private val attemptedDegradeQualities = mutableSetOf<String>()
+    private val attemptedStreamCombinations = mutableSetOf<String>()
     private var lastDegradeTimestamp = 0L
     private var hasInitialAutoPlayed = false
     private var hasUserInteracted = false
@@ -142,6 +143,7 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
         val currentToken = ++playToken
         autoDegradeCount = 0
         attemptedDegradeQualities.clear()
+        attemptedStreamCombinations.clear()
         lastDegradeTimestamp = 0L
 
         _uiState.update {
@@ -222,16 +224,20 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
                                 )
                             }
                         } else {
-                            // 降级选择其他可播放清晰度
-                            val fallbackStream = streamData.streams.values.firstOrNull()
-                            val fallbackUrl = pickStreamUrl(fallbackStream, chosenProtocol)
-                            if (!fallbackUrl.isNullOrEmpty()) {
+                            // 降级选择其他可播放清晰度（仍按保守顺序优先 hd/sd，避免选中 origin）
+                            val conservativeOrder = listOf("hd", "sd", "uhd", "ld", "md", "default", "origin")
+                            val fallbackPair = conservativeOrder.firstNotNullOfOrNull { qKey ->
+                                pickStreamUrl(streamData.streams[qKey], chosenProtocol)?.let { url -> qKey to url }
+                            } ?: streamData.streams.entries.firstNotNullOfOrNull { (qKey, s) ->
+                                pickStreamUrl(s, chosenProtocol)?.let { url -> qKey to url }
+                            }
+                            if (fallbackPair != null) {
                                 _uiState.update {
                                     it.copy(
                                         activeChannel = updated,
                                         currentStreamData = streamData,
-                                        selectedQuality = streamData.streams.keys.first(),
-                                        playbackUrl = fallbackUrl,
+                                        selectedQuality = fallbackPair.first,
+                                        playbackUrl = fallbackPair.second,
                                         playbackStatus = PlaybackStatus.Playing
                                     )
                                 }
@@ -289,8 +295,8 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
 
     private fun selectBestQuality(streams: Map<String, QualityStream>, preferred: String): String {
         if (streams.containsKey(preferred)) return preferred
-        // 优先匹配高清 (hd) 或超清 (uhd)，保障设备硬件解码流畅稳定
-        val priority = listOf("hd", "uhd", "sd", "origin", "md", "ld", "default")
+        // 默认选流保守策略：优先匹配高清 (hd) / 标清 (sd)，将原画 (origin) 置于最末位，显著降低低端机/盒子首次即原画黑屏的概率
+        val priority = listOf("hd", "sd", "uhd", "ld", "md", "default", "origin")
         return priority.firstOrNull { streams.containsKey(it) } ?: streams.keys.firstOrNull() ?: "default"
     }
 
@@ -307,6 +313,7 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
         if (isManual) {
             autoDegradeCount = 0
             attemptedDegradeQualities.clear()
+            attemptedStreamCombinations.clear()
             lastDegradeTimestamp = 0L
         }
         val currentStream = _uiState.value.currentStreamData ?: return
@@ -327,6 +334,7 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
         if (isManual) {
             autoDegradeCount = 0
             attemptedDegradeQualities.clear()
+            attemptedStreamCombinations.clear()
             lastDegradeTimestamp = 0L
         }
         val currentStream = _uiState.value.currentStreamData
@@ -416,14 +424,12 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
     }
 
     fun handlePlayerError(isDecoderError: Boolean, errorMsg: String) {
-        val currentStream = _uiState.value.currentStreamData
-        if (isDecoderError && currentStream != null && currentStream.streams.size > 1 && autoDegradeCount < MAX_AUTO_DEGRADES_PER_CHANNEL) {
-            // 解码器瓶颈直接走军工级单向单次自愈引擎
-            autoRecoverBlackScreen()
+        // 只要还有可降的画质或可切换的备用协议，解码错误或持久流异常均优先自动降流自愈，不直接弹“点击重试”
+        if (performAutoRecover(fromError = true)) {
             return
         }
 
-        // 已经自愈降级过或无法再降级，直接显示清晰的错误状态与重试按钮，绝对不自作主张来回切流
+        // 所有可用低画质及备用协议均已耗尽或达到会话上限，显示明确错误态与手动重试入口
         setPlaybackStatus(
             PlaybackStatus.Error(
                 if (isDecoderError) "当前清晰度解码受限，点击重试或手动切换画质"
@@ -433,54 +439,135 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
     }
 
     /**
-     * 军工级自适应画质锁定自愈引擎：
+     * 军工级自适应画质锁定与协议兜底自愈引擎：
      * 1. 严格单向单调降级：origin -> uhd -> hd -> sd -> ld -> md -> default，绝不逆向回弹。
-     * 2. 会话单次锁定（One-shot Lock）：每个频道会话最多自动降级自愈 1 次，自适应后立即锁定稳定播放，彻底杜绝来回反复切换！
+     * 2. 会话最多自动降 3 次，两次看门狗降级间隔缩短至 3.5 秒。
+     * 3. 若已无更低画质可降，自动尝试切换协议（HLS <-> FLV）换源重试。
      */
     fun autoRecoverBlackScreen() {
-        // 若当前会话已自适应降级过一次，立即熔断锁定，坚决不再反复切换！
+        performAutoRecover(fromError = false)
+    }
+
+    private fun performAutoRecover(fromError: Boolean): Boolean {
         if (autoDegradeCount >= MAX_AUTO_DEGRADES_PER_CHANNEL) {
-            return
+            return false
         }
 
         val now = System.currentTimeMillis()
-        if (now - lastDegradeTimestamp < 8000L) {
-            return
+        val cooldownMs = if (fromError) 800L else 3500L
+        if (now - lastDegradeTimestamp < cooldownMs) {
+            return false
         }
-        lastDegradeTimestamp = now
 
-        val streamData = _uiState.value.currentStreamData
+        val streamData = _uiState.value.currentStreamData ?: return false
+        if (streamData.streams.isEmpty()) return false
+
+        val available = streamData.streams
         val currentQuality = _uiState.value.selectedQuality
+        val currentProtocol = _uiState.value.selectedProtocol
+        val currentUrl = _uiState.value.playbackUrl
 
-        if (streamData != null && streamData.streams.isNotEmpty()) {
-            val available = streamData.streams
+        attemptedDegradeQualities.add(currentQuality)
+        attemptedStreamCombinations.add("$currentQuality:$currentProtocol")
 
-            attemptedDegradeQualities.add(currentQuality)
+        val currentRank = QUALITY_DOWNGRADE_HIERARCHY.indexOf(currentQuality).let {
+            if (it == -1) 0 else it
+        }
 
-            val currentRank = QUALITY_DOWNGRADE_HIERARCHY.indexOf(currentQuality).let {
-                if (it == -1) 2 else it
-            }
+        // 1. 严格自当前位次向下寻找更低码率兼容清晰度
+        val lowerCandidates = QUALITY_DOWNGRADE_HIERARCHY.filterIndexed { index, qKey ->
+            index > currentRank && available.containsKey(qKey) && !attemptedDegradeQualities.contains(qKey)
+        }
 
-            // 严格自当前位次向下寻找更低码率兼容清晰度
-            val lowerCandidates = QUALITY_DOWNGRADE_HIERARCHY.filterIndexed { index, qKey ->
-                index > currentRank && available.containsKey(qKey) && !attemptedDegradeQualities.contains(qKey)
-            }
-
-            if (lowerCandidates.isNotEmpty()) {
-                val targetQuality = lowerCandidates.first()
-                autoDegradeCount++ // 标记已完成一次自适应自愈，永久锁定当前会话稳定播放
-                attemptedDegradeQualities.add(targetQuality)
-                val targetName = available[targetQuality]?.name ?: targetQuality
-                showToast("已自适应优化画质至：$targetName，稳定播放中")
-                changeQuality(targetQuality, isManual = false)
-                return
-            } else {
-                // 如果当前已是最低画质，直接锁定
+        for (targetQuality in lowerCandidates) {
+            val candidateStream = available[targetQuality]
+            val candidateUrl = pickStreamUrl(candidateStream, currentProtocol)
+            val comboKey = "$targetQuality:$currentProtocol"
+            if (!candidateUrl.isNullOrEmpty() && candidateUrl != currentUrl && !attemptedStreamCombinations.contains(comboKey)) {
+                lastDegradeTimestamp = now
                 autoDegradeCount++
-                return
+                attemptedDegradeQualities.add(targetQuality)
+                attemptedStreamCombinations.add(comboKey)
+                val targetName = candidateStream?.name ?: targetQuality
+                showToast("高画质异常，已自动降至：$targetName")
+                changeQuality(targetQuality, isManual = false)
+                return true
             }
+        }
+
+        // 2. 已无更低画质时，尝试切换传输协议（HLS <-> FLV）换源重试
+        val altProtocol = if (currentProtocol == "hls") "flv" else "hls"
+        val protocolFallbackOrder = buildList {
+            if (available.containsKey(currentQuality)) add(currentQuality)
+            addAll(QUALITY_DOWNGRADE_HIERARCHY.filter { it != currentQuality && available.containsKey(it) })
+        }
+
+        for (qKey in protocolFallbackOrder) {
+            val qRank = QUALITY_DOWNGRADE_HIERARCHY.indexOf(qKey).let { if (it == -1) 0 else it }
+            if (qRank < currentRank) continue
+
+            val stream = available[qKey] ?: continue
+            val altUrl = if (altProtocol == "flv") stream.flv else stream.hls
+            val comboKey = "$qKey:$altProtocol"
+            if (!altUrl.isNullOrEmpty() && altUrl != currentUrl && !attemptedStreamCombinations.contains(comboKey)) {
+                lastDegradeTimestamp = now
+                autoDegradeCount++
+                attemptedDegradeQualities.add(qKey)
+                attemptedStreamCombinations.add(comboKey)
+                val targetName = stream.name
+                showToast("高画质异常，已自动切换 ${altProtocol.uppercase()} ($targetName)")
+                _uiState.update {
+                    it.copy(
+                        selectedProtocol = altProtocol,
+                        selectedQuality = qKey,
+                        playbackUrl = altUrl,
+                        playbackStatus = PlaybackStatus.Playing
+                    )
+                }
+                return true
+            }
+        }
+
+        if (!fromError) {
+            autoDegradeCount = MAX_AUTO_DEGRADES_PER_CHANNEL
+            val status = _uiState.value.playbackStatus
+            if (status is PlaybackStatus.Buffering || status is PlaybackStatus.Connecting) {
+                setPlaybackStatus(PlaybackStatus.Error("拉流超时或画质不兼容，点击重试或切换协议"))
+            } else {
+                showToast("已尝试最低画质及备用协议，可点击重试或切换频道")
+            }
+        }
+        return false
+    }
+
+    @androidx.annotation.VisibleForTesting
+    internal fun seedPlaybackForTest(
+        streamData: LiveStreamData,
+        selectedQuality: String = "uhd",
+        selectedProtocol: String = "hls",
+        playbackUrl: String? = null
+    ) {
+        autoDegradeCount = 0
+        attemptedDegradeQualities.clear()
+        attemptedStreamCombinations.clear()
+        lastDegradeTimestamp = 0L
+        val resolvedUrl = playbackUrl ?: pickStreamUrl(streamData.streams[selectedQuality], selectedProtocol)
+        _uiState.update {
+            it.copy(
+                currentStreamData = streamData,
+                selectedQuality = selectedQuality,
+                selectedProtocol = selectedProtocol,
+                playbackUrl = resolvedUrl,
+                playbackStatus = PlaybackStatus.Playing
+            )
         }
     }
+
+    @androidx.annotation.VisibleForTesting
+    internal fun selectConservativeQualityForTest(
+        streams: Map<String, QualityStream>,
+        preferred: String = "hd"
+    ): String = selectBestQuality(streams, preferred)
 
     /**
      * 彻底停止播放并释放解码与网络资源（退出应用时调用，释放后台资源）
