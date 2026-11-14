@@ -616,4 +616,32 @@ class ExampleRobolectricTest {
     assertFalse(TvKeyEventPolicy.shouldIgnoreRepeat(android.view.KeyEvent.KEYCODE_VOLUME_UP, repeatCount = 2))
     assertFalse(TvKeyEventPolicy.shouldIgnoreRepeat(android.view.KeyEvent.KEYCODE_DPAD_RIGHT, repeatCount = 3))
   }
+
+  @Test
+  fun `test ChannelDisplayFormatter preserves anchor name and suppresses raw room numbers`() {
+    val anchor = LiveChannel(
+      rid = "171612155041",
+      name = "茉莉·molly",
+      title = "迷人的笑脸吸引视线",
+      avatar = "",
+      isLive = true,
+      statusKnown = true
+    )
+    assertEquals("茉莉·molly", com.example.ui.components.ChannelDisplayFormatter.resolveBannerName(anchor))
+    assertEquals("迷人的笑脸吸引视线", com.example.ui.components.ChannelDisplayFormatter.resolveBannerSubText(anchor))
+
+    val numericFallback = LiveChannel(
+      rid = "171612155041",
+      name = "房间 171612155041",
+      title = "房间号: 171612155041",
+      avatar = "",
+      isLive = true,
+      statusKnown = true
+    )
+    val resolvedName = com.example.ui.components.ChannelDisplayFormatter.resolveBannerName(numericFallback)
+    val resolvedSub = com.example.ui.components.ChannelDisplayFormatter.resolveBannerSubText(numericFallback)
+    assertFalse(resolvedName.contains("171612155041"))
+    assertEquals("实况直播中", resolvedSub)
+    assertFalse(resolvedSub.contains("171612155041"))
+  }
 }

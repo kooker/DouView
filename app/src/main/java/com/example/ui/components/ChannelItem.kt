@@ -62,7 +62,8 @@ fun ChannelItem(
     isActive: Boolean,
     onClick: () -> Unit,
     onDelete: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isTv: Boolean = false
 ) {
     // 呼吸灯动画
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
@@ -80,12 +81,24 @@ fun ChannelItem(
 
     var isFocused by remember { mutableStateOf(false) }
 
+    val showTvCardFocus = isTv && isFocused
+    val cardBorderWidth = when {
+        showTvCardFocus -> 2.dp
+        isActive -> 1.5.dp
+        else -> 1.dp
+    }
+    val cardBorderColor = when {
+        showTvCardFocus -> Color(0xFF00D26A)
+        isActive -> DouyinRed
+        else -> StudioBorder
+    }
+
     Box(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(10.dp))
             .background(
-                if (isActive || isFocused) {
+                if (isActive || showTvCardFocus) {
                     Brush.horizontalGradient(
                         colors = listOf(
                             Color(0x33FE2C55),
@@ -99,8 +112,8 @@ fun ChannelItem(
                 }
             )
             .border(
-                width = if (isActive || isFocused) 2.dp else 1.dp,
-                color = if (isFocused) Color(0xFF00D26A) else if (isActive) DouyinRed else StudioBorder,
+                width = cardBorderWidth,
+                color = cardBorderColor,
                 shape = RoundedCornerShape(10.dp)
             )
             .onFocusChanged { isFocused = it.isFocused }
@@ -230,22 +243,32 @@ fun ChannelItem(
                 )
             }
 
-            // 删除按钮（兼容遥控器绿色焦点环与触控目标）
+            // 删除按钮：移动端保持简洁无边框触控体验；TV 端仅在获得焦点时绘制绿色聚焦环（避免 0.dp 细线黑/绿圈残留）
             var isDeleteFocused by remember { mutableStateOf(false) }
-            IconButton(
-                onClick = onDelete,
+            val showTvDeleteFocus = isTv && isDeleteFocused
+            Box(
+                contentAlignment = Alignment.Center,
                 modifier = Modifier
-                    .size(44.dp)
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .then(
+                        if (showTvDeleteFocus) {
+                            Modifier
+                                .background(Color(0x3300D26A), CircleShape)
+                                .border(2.dp, Color(0xFF00D26A), CircleShape)
+                        } else {
+                            Modifier
+                        }
+                    )
                     .onFocusChanged { isDeleteFocused = it.isFocused }
-                    .background(if (isDeleteFocused) Color(0x3300D26A) else Color.Transparent, CircleShape)
-                    .border(if (isDeleteFocused) 2.dp else 0.dp, Color(0xFF00D26A), CircleShape)
+                    .clickable(onClick = onDelete)
                     .testTag("btn_delete_channel_${channel.rid}")
             ) {
                 Icon(
                     imageVector = Icons.Default.Close,
                     contentDescription = "删除频道",
-                    tint = if (isDeleteFocused) Color(0xFF00D26A) else Color(0xFF7A7A8C),
-                    modifier = Modifier.size(16.dp)
+                    tint = if (showTvDeleteFocus) Color(0xFF00D26A) else Color(0xFF8A8A9A),
+                    modifier = Modifier.size(17.dp)
                 )
             }
         }

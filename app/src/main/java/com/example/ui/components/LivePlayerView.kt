@@ -129,7 +129,8 @@ fun LivePlayerView(
     isPiPMode: Boolean = false,
     volume: Float = 1.0f,
     isScreenOffAudioMode: Boolean = false,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isTv: Boolean = false
 ) {
     val context = LocalContext.current
     var autoRetryCount by remember { mutableIntStateOf(0) }
@@ -760,7 +761,7 @@ fun LivePlayerView(
                             Button(
                                 onClick = onRetry,
                                 colors = ButtonDefaults.buttonColors(containerColor = DouyinRed),
-                                border = if (isRetryFocused) BorderStroke(2.dp, Color(0xFF00D26A)) else null,
+                                border = if (isTv && isRetryFocused) BorderStroke(2.dp, Color(0xFF00D26A)) else null,
                                 shape = RoundedCornerShape(20.dp),
                                 modifier = Modifier
                                     .onFocusChanged { isRetryFocused = it.isFocused }
