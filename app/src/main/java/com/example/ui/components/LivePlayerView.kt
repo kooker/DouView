@@ -152,8 +152,8 @@ internal object AmbientFrameSampler {
         srcPixels: IntArray,
         srcW: Int,
         srcH: Int,
-        cropFraction: Float = 0.08f,
-        radius: Int = 4
+        cropFraction: Float = 0.06f,
+        radius: Int = 2
     ): Triple<IntArray, Int, Int> {
         if (srcW < 6 || srcH < 6 || srcPixels.size < srcW * srcH) {
             return Triple(IntArray(0), 0, 0)
@@ -409,7 +409,8 @@ fun LivePlayerView(
             override fun onVideoSizeChanged(videoSize: VideoSize) {
                 if (videoSize.width > 0 && videoSize.height > 0) {
                     hasVideoSize = true
-                    val isPortrait = videoSize.height > videoSize.width
+                    val effectiveWidth = videoSize.width * videoSize.pixelWidthHeightRatio
+                    val isPortrait = videoSize.height > effectiveWidth
                     isPortraitStream = isPortrait
                     currentOnAspectRatio(isPortrait)
                     hasRenderedFirstFrame = true // 视频轨道尺寸已成功解析，解码正常
@@ -597,14 +598,14 @@ fun LivePlayerView(
     }
 
     // TV 端与移动端统一的实况动态氛围背景采样进程：
-    // - 仅对竖屏流启动轻量级 64px 级纹理采样 + 8% 内缩抗绿边裁切 + 两遍柔光模糊，TV 盒子 (~5fps) 与手机 (~8fps) 均极低功耗丝滑运行
+    // - 对竖屏流启用 224p 轻量纹理采样 + 6% 内缩抗绿边裁切 + 两遍柔光模糊，TV 盒子 (~8fps) 与手机 (~10fps) 均清晰可辨且丝滑运行
     // - 绝不向 Compose 层暴露可变/复用 Bitmap，消除 GPU Stride 绿边与位图回收竞争崩溃
     LaunchedEffect(isPlaying, isPortraitStream, hasRenderedFirstFrame, isScreenOffAudioMode, isLifecycleBackground, isTv, isLowRamDevice) {
         if (isPlaying && isPortraitStream && hasRenderedFirstFrame && !isScreenOffAudioMode && !isLifecycleBackground) {
             var scratchW = 0
             var scratchH = 0
             var scratchBmp: Bitmap? = null
-            val intervalMs = if (isTv || isLowRamDevice) 200L else 125L
+            val intervalMs = if (isTv || isLowRamDevice) 125L else 100L
             try {
                 while (isActive) {
                     try {
@@ -613,8 +614,8 @@ fun LivePlayerView(
                             val tvW = textureView.width
                             val tvH = textureView.height
                             if (tvW > 8 && tvH > 8) {
-                                val targetH = 112
-                                val targetW = ((targetH.toFloat() * tvW) / tvH).toInt().coerceIn(48, 160)
+                                val targetH = 224
+                                val targetW = ((targetH.toFloat() * tvW) / tvH).toInt().coerceIn(96, 360)
                                 val bmp = if (scratchBmp != null && !scratchBmp!!.isRecycled && scratchW == targetW && scratchH == targetH) {
                                     scratchBmp!!
                                 } else {
@@ -713,8 +714,8 @@ fun LivePlayerView(
                 .background(
                     Brush.radialGradient(
                         colors = listOf(
-                            Color(0x22000000),
-                            Color(0x99000000)
+                            Color(0x18000000),
+                            Color(0x88000000)
                         )
                     )
                 )

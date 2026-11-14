@@ -560,18 +560,20 @@ object DouyinLiveEngine {
                         }
                     }
 
-                    // 补全 tree 中未在 QUALITY_ORDER 内的任意其它画质
+                    // 补全 tree 中未在 QUALITY_ORDER 内的任意其它画质，并将 sd1/sd2 规范映射为 sd (540P)
                     val it = tree.keys()
                     while (it.hasNext()) {
-                        val key = it.next()
-                        if (!streams.containsKey(key)) {
-                            val qualityObj = tree.optJSONObject(key) ?: continue
+                        val rawKey = it.next()
+                        val normalizedKey = if (rawKey.equals("sd1", true) || rawKey.equals("sd2", true)) "sd" else rawKey
+                        if (!streams.containsKey(normalizedKey)) {
+                            val qualityObj = tree.optJSONObject(rawKey) ?: continue
                             val main = qualityObj.optJSONObject("main") ?: qualityObj.optJSONObject("backup")
                             if (main != null) {
                                 val flv = fixUrl(main.optString("flv"))
                                 val hls = fixUrl(main.optString("hls"))
                                 if (!flv.isNullOrEmpty() || !hls.isNullOrEmpty()) {
-                                    streams[key] = QualityStream(key.uppercase(), flv, hls)
+                                    val label = QUALITY_MAP[normalizedKey] ?: rawKey.uppercase()
+                                    streams[normalizedKey] = QualityStream(label, flv, hls)
                                 }
                             }
                         }
