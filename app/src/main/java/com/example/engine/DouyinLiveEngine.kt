@@ -101,6 +101,8 @@ object DouyinLiveEngine {
 
     private val QUALITY_MAP = QUALITY_ORDER.toMap()
 
+    fun qualityLabel(qualityKey: String): String = QUALITY_MAP[qualityKey] ?: "画质自适应"
+
     /**
      * 1. 提取输入源：支持整段手机分享口令、官方短链、PC 网页链接、纯数字房间号
      */
@@ -578,34 +580,34 @@ object DouyinLiveEngine {
             } catch (_: Exception) {}
         }
 
-        // 2. 如果 stream_data 为空或部分缺失，从 stream_url 的顶层属性 (hls_pull_url_map, flv_pull_url) 补全
+        // 2. 从 stream_url 的顶层属性 (hls_pull_url_map, flv_pull_url) 补全缺失画质（确保标清 SD1/540P 不被漏掉）
         val hlsMap = su.optJSONObject("hls_pull_url_map")
         val flvMap = su.optJSONObject("flv_pull_url")
 
-        if (streams.isEmpty()) {
-            if (hlsMap != null || flvMap != null) {
-                val qualityAliases = listOf(
-                    Triple("hd", "HD1", "高清 (720P)"),
-                    Triple("uhd", "FULL_HD1", "超清 (1080P)"),
-                    Triple("sd", "SD1", "标清 (540P)"),
-                    Triple("sd", "SD2", "标清")
-                )
-                for ((qKey, mapKey, label) in qualityAliases) {
+        if (hlsMap != null || flvMap != null) {
+            val qualityAliases = listOf(
+                Triple("hd", "HD1", "高清 (720P)"),
+                Triple("uhd", "FULL_HD1", "超清 (1080P)"),
+                Triple("sd", "SD1", "标清 (540P)"),
+                Triple("sd", "SD2", "标清 (540P)")
+            )
+            for ((qKey, mapKey, label) in qualityAliases) {
+                if (!streams.containsKey(qKey)) {
                     val hls = fixUrl(hlsMap?.optString(mapKey))
                     val flv = fixUrl(flvMap?.optString(mapKey))
                     if (!hls.isNullOrEmpty() || !flv.isNullOrEmpty()) {
-                        if (!streams.containsKey(qKey)) {
-                            streams[qKey] = QualityStream(label, flv, hls)
-                        }
+                        streams[qKey] = QualityStream(label, flv, hls)
                     }
                 }
             }
+        }
 
+        if (streams.isEmpty()) {
             val defaultHls = fixUrl(su.optString("hls_pull_url")) ?: extractFirstUrlFromObj(hlsMap)
             val defaultFlv = fixUrl(su.optString("rtmp_pull_url")) ?: extractFirstUrlFromObj(flvMap)
 
-            if ((!defaultHls.isNullOrEmpty() || !defaultFlv.isNullOrEmpty()) && streams.isEmpty()) {
-                streams["default"] = QualityStream("高清 (推荐)", defaultFlv, defaultHls)
+            if (!defaultHls.isNullOrEmpty() || !defaultFlv.isNullOrEmpty()) {
+                streams["default"] = QualityStream("默认画质", defaultFlv, defaultHls)
             }
         }
 

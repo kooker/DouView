@@ -145,9 +145,12 @@ class ChannelRepository(private val channelDao: ChannelDao) {
         channelDao.deleteAll()
     }
 
+    suspend fun replaceAll(channels: List<LiveChannel>) = withContext(Dispatchers.IO) {
+        channelDao.replaceAll(channels)
+    }
+
     suspend fun resetDefaults() = withContext(Dispatchers.IO) {
-        channelDao.deleteAll()
-        channelDao.insertAll(getDefaultChannels())
+        channelDao.replaceAll(getDefaultChannels())
     }
 
     suspend fun getAllChannels(): List<LiveChannel> = withContext(Dispatchers.IO) {

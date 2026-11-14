@@ -417,7 +417,7 @@ private fun MobileControlsBar(
             // 清晰度选择器
             Box {
                 val currentQualityName = availableQualities[selectedQuality]?.name
-                    ?: (if (availableQualities.isNotEmpty()) availableQualities.values.first().name else "清晰度")
+                    ?: (if (availableQualities.isNotEmpty()) availableQualities.values.first().name else com.example.engine.DouyinLiveEngine.qualityLabel(selectedQuality))
 
                 Surface(
                     onClick = { isQualityDropdownOpen = true },

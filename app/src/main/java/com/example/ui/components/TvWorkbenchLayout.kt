@@ -409,7 +409,7 @@ private fun TvControlsRow(
 
             Box {
                 val currentQualityName = availableQualities[selectedQuality]?.name
-                    ?: (if (availableQualities.isNotEmpty()) availableQualities.values.first().name else "清晰度自适应")
+                    ?: (if (availableQualities.isNotEmpty()) availableQualities.values.first().name else com.example.engine.DouyinLiveEngine.qualityLabel(selectedQuality))
 
                 var isQualityFocused by remember { mutableStateOf(false) }
                 OutlinedButton(

@@ -5,6 +5,7 @@ import androidx.room.Delete
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -35,4 +36,12 @@ interface ChannelDao {
 
     @Query("DELETE FROM live_channels")
     suspend fun deleteAll()
+
+    @Transaction
+    suspend fun replaceAll(channels: List<LiveChannel>) {
+        deleteAll()
+        if (channels.isNotEmpty()) {
+            insertAll(channels)
+        }
+    }
 }

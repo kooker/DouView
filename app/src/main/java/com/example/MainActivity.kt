@@ -40,6 +40,11 @@ class MainActivity : ComponentActivity() {
     private var lastBackPressTime = 0L
     private var lastChannelSwitchTime = 0L
     private var isScreenOff = false
+    private var suppressTvBackgroundExit = false
+
+    fun suppressNextTvBackgroundExit() {
+        suppressTvBackgroundExit = true
+    }
 
     private val screenStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -120,6 +125,7 @@ class MainActivity : ComponentActivity() {
      */
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
+        if (suppressTvBackgroundExit || isChangingConfigurations) return
         if (isTvDevice()) {
             // 电视端用户按下主页键 (Home Key)：彻底停止播放并退出应用任务，绝不滞留后台
             viewModel.stopPlayback()
@@ -148,8 +154,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
-        if (isTvDevice() && !isInPictureInPictureModeState) {
-            viewModel.stopPlayback()
+        // 电视端仅在非配置变更/非外部文件选择器期间做轻量化节能暂停，避免短暂系统弹窗导致播放 Url 被清空黑屏
+        if (isTvDevice() && !isInPictureInPictureModeState && !suppressTvBackgroundExit && !isChangingConfigurations) {
+            viewModel.pausePlaybackForBatteryOptimization()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val wasSuppressed = suppressTvBackgroundExit
+        suppressTvBackgroundExit = false
+        if (isTvDevice() && !wasSuppressed && viewModel.uiState.value.playbackStatus is PlaybackStatus.Idle) {
+            viewModel.resumePlaybackFromBackground()
         }
     }
 
@@ -169,8 +185,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
+        if (isChangingConfigurations || suppressTvBackgroundExit) {
+            return
+        }
         if (isTvDevice()) {
-            // 电视端进入后台（按主页键或切换应用）：彻底停止播放并退出任务，绝不滞留后台
+            // 电视端用户主动退出至后台（Home/切换应用）：彻底停止播放并退出任务，绝不滞留后台
             viewModel.stopPlayback()
             finishAndRemoveTask()
             finishAffinity()
@@ -194,7 +213,9 @@ class MainActivity : ComponentActivity() {
         try {
             unregisterReceiver(screenStateReceiver)
         } catch (_: Exception) {}
-        viewModel.stopPlayback()
+        if (!isChangingConfigurations) {
+            viewModel.stopPlayback()
+        }
     }
 
     override fun onStart() {
@@ -215,6 +236,7 @@ class MainActivity : ComponentActivity() {
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         val state = viewModel.uiState.value
         val isFullscreen = state.isFullscreen
+        val isDrawerOpen = state.isTvChannelDrawerOpen
         val hasOpenDialog = state.activeDialog != null
         val repeatCount = event?.repeatCount ?: 0
 
@@ -224,6 +246,21 @@ class MainActivity : ComponentActivity() {
 
         if (TvKeyEventPolicy.shouldIgnoreRepeat(keyCode, repeatCount)) {
             return true
+        }
+
+        when (TvKeyEventPolicy.resolveAction(keyCode, isFullscreen = isFullscreen, isDrawerOpen = isDrawerOpen)) {
+            TvKeyAction.TOGGLE_DRAWER -> {
+                viewModel.toggleTvChannelDrawer()
+                return true
+            }
+            TvKeyAction.CLOSE_DRAWER -> {
+                viewModel.setTvChannelDrawerOpen(false)
+                return true
+            }
+            TvKeyAction.PASS_TO_COMPOSE -> {
+                return super.onKeyDown(keyCode, event)
+            }
+            TvKeyAction.DEFAULT -> Unit
         }
 
         when (keyCode) {
@@ -365,16 +402,19 @@ class MainActivity : ComponentActivity() {
                 return true
             }
             KeyEvent.KEYCODE_MENU -> {
-                if (isFullscreen) {
-                    viewModel.manualRefresh()
-                } else {
-                    viewModel.checkVersionUpdate(manual = true)
-                }
+                viewModel.toggleTvChannelDrawer()
                 return true
             }
         }
         return super.onKeyDown(keyCode, event)
     }
+}
+
+internal enum class TvKeyAction {
+    TOGGLE_DRAWER,
+    CLOSE_DRAWER,
+    PASS_TO_COMPOSE,
+    DEFAULT
 }
 
 internal object TvKeyEventPolicy {
@@ -401,5 +441,24 @@ internal object TvKeyEventPolicy {
             in KeyEvent.KEYCODE_1..KeyEvent.KEYCODE_9 -> true
             else -> false
         }
+    }
+
+    fun resolveAction(keyCode: Int, isFullscreen: Boolean, isDrawerOpen: Boolean): TvKeyAction {
+        if (keyCode == KeyEvent.KEYCODE_MENU) {
+            return TvKeyAction.TOGGLE_DRAWER
+        }
+        if (isDrawerOpen) {
+            return when (keyCode) {
+                KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_DPAD_RIGHT -> TvKeyAction.CLOSE_DRAWER
+                KeyEvent.KEYCODE_DPAD_UP,
+                KeyEvent.KEYCODE_DPAD_DOWN,
+                KeyEvent.KEYCODE_DPAD_LEFT,
+                KeyEvent.KEYCODE_DPAD_CENTER,
+                KeyEvent.KEYCODE_ENTER,
+                KeyEvent.KEYCODE_NUMPAD_ENTER -> TvKeyAction.PASS_TO_COMPOSE
+                else -> TvKeyAction.DEFAULT
+            }
+        }
+        return TvKeyAction.DEFAULT
     }
 }

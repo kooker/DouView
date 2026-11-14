@@ -73,7 +73,8 @@ data class WorkbenchUiState(
     val activeDialog: ActiveDialog? = null,
     val toastMessage: String? = null,
     val isInputBusy: Boolean = false,
-    val isScreenOffAudioMode: Boolean = false
+    val isScreenOffAudioMode: Boolean = false,
+    val isTvChannelDrawerOpen: Boolean = false
 )
 
 class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(application) {
@@ -95,6 +96,17 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
         private val REGEX_RID_TOKEN = Regex("\\b(\\d{3,22})\\b")
         private val REGEX_CONTROL_CHARS = Regex("[\\u0000-\\u001F\\u007F]")
         private const val MAX_IMPORT_CHANNELS = 500
+
+        /**
+         * 并发测活防僵尸复活过滤：仅保留当前仍存在于数据库中的频道，绝不将测活期间用户已删除的频道写回数据库
+         */
+        @androidx.annotation.VisibleForTesting
+        internal fun filterExistingUpdatedChannels(
+            changedChannels: List<LiveChannel>,
+            existingRids: Set<String>
+        ): List<LiveChannel> {
+            return changedChannels.filter { it.rid in existingRids }
+        }
     }
 
     private val isTvDevice: Boolean = DeviceEnvironment.isTvDevice(application)
@@ -128,11 +140,14 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
             repository.allChannels.collect { channelList ->
                 _uiState.update { current ->
                     val updatedActive = current.activeChannel?.let { active ->
-                        channelList.find { it.rid == active.rid } ?: active
+                        channelList.find { it.rid == active.rid }
                     }
+                    val fallbackActive = if (channelList.isNotEmpty()) {
+                        channelList.firstOrNull { it.isLive } ?: channelList.first()
+                    } else null
                     current.copy(
                         channels = channelList,
-                        activeChannel = updatedActive ?: (if (current.activeChannel == null && channelList.isNotEmpty()) channelList.first() else null)
+                        activeChannel = updatedActive ?: fallbackActive
                     )
                 }
 
@@ -428,11 +443,28 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
      * 全屏模式控制（适配电视遥控器 OK 键及手机一键全屏切换）
      */
     fun setFullscreen(fullscreen: Boolean) {
-        _uiState.update { it.copy(isFullscreen = fullscreen) }
+        _uiState.update {
+            it.copy(
+                isFullscreen = fullscreen,
+                isTvChannelDrawerOpen = if (!fullscreen) false else it.isTvChannelDrawerOpen
+            )
+        }
     }
 
     fun toggleFullscreen() {
-        _uiState.update { it.copy(isFullscreen = !it.isFullscreen) }
+        val nextFullscreen = !_uiState.value.isFullscreen
+        setFullscreen(nextFullscreen)
+    }
+
+    /**
+     * 电视端菜单键左侧在线直播换台抽屉开关
+     */
+    fun setTvChannelDrawerOpen(open: Boolean) {
+        _uiState.update { it.copy(isTvChannelDrawerOpen = open) }
+    }
+
+    fun toggleTvChannelDrawer() {
+        _uiState.update { it.copy(isTvChannelDrawerOpen = !it.isTvChannelDrawerOpen) }
     }
 
     /**
@@ -829,9 +861,13 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
                 // 批次间微休眠 150ms 保护网络与系统低功耗
                 delay(150L)
             }
-            // 探活全轮询完毕后一次性原子更新，彻底消除逐条探活引起的界面频繁闪烁与跳动
+            // 探活全轮询完毕后一次性原子更新，并校验现存 RID 集合，彻底消除已删除频道僵尸复活及界面闪烁
             if (changedChannels.isNotEmpty()) {
-                repository.insertAll(changedChannels)
+                val existingRids = repository.getAllChannels().map { it.rid }.toHashSet()
+                val safeUpdated = filterExistingUpdatedChannels(changedChannels, existingRids)
+                if (safeUpdated.isNotEmpty()) {
+                    repository.insertAll(safeUpdated)
+                }
             }
 
             // 首次载入在线策略优化：若冷启动阶段当前频道未开播且用户尚未手动干预，自动接力切至首个探活确认在线的频道
@@ -859,9 +895,11 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
                 }
 
                 if (mode == ImportMode.REPLACE) {
-                    repository.deleteAll()
-                    repository.insertAll(parsedList)
+                    repository.replaceAll(parsedList)
                     showToast("已覆盖保存 ${parsedList.size} 个频道到本地数据库")
+                    parsedList.firstOrNull()?.let { first ->
+                        playChannel(first, forceRefresh = false, isUserInitiated = true)
+                    }
                 } else {
                     repository.insertAll(parsedList)
                     showToast("已成功合并保存 ${parsedList.size} 个频道到本地数据库")
@@ -887,9 +925,11 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
                 }
 
                 if (mode == ImportMode.REPLACE) {
-                    repository.deleteAll()
-                    repository.insertAll(parsedList)
+                    repository.replaceAll(parsedList)
                     showToast("已成功导入并覆盖保存 ${parsedList.size} 个频道")
+                    parsedList.firstOrNull()?.let { first ->
+                        playChannel(first, forceRefresh = false, isUserInitiated = true)
+                    }
                 } else {
                     repository.insertAll(parsedList)
                     showToast("已成功合并保存 ${parsedList.size} 个频道")
@@ -1041,8 +1081,8 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val app = getApplication<Application>()
-                app.cacheDir.deleteRecursively()
-                app.externalCacheDir?.deleteRecursively()
+                app.cacheDir.listFiles()?.forEach { it.deleteRecursively() }
+                app.externalCacheDir?.listFiles()?.forEach { it.deleteRecursively() }
                 DouyinLiveEngine.clearCache()
                 showToast("缓存深度清理完成，已释放存储空间")
             } catch (e: Exception) {

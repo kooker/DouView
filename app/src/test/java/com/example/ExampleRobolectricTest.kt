@@ -749,4 +749,134 @@ class ExampleRobolectricTest {
     assertEquals(0L, tvCtrl.getBackBufferDurationUs(androidx.media3.exoplayer.analytics.PlayerId.UNSET))
     assertEquals(5_000_000L, defaultCtrl.getBackBufferDurationUs(androidx.media3.exoplayer.analytics.PlayerId.UNSET))
   }
+
+  @Test
+  fun `test TvKeyEventPolicy routes MENU key to drawer toggle and shields D-pad keys while drawer is open`() {
+    // 1. MENU key toggles drawer in both fullscreen and workbench modes
+    assertEquals(
+      TvKeyAction.TOGGLE_DRAWER,
+      TvKeyEventPolicy.resolveAction(android.view.KeyEvent.KEYCODE_MENU, isFullscreen = true, isDrawerOpen = false)
+    )
+    assertEquals(
+      TvKeyAction.TOGGLE_DRAWER,
+      TvKeyEventPolicy.resolveAction(android.view.KeyEvent.KEYCODE_MENU, isFullscreen = false, isDrawerOpen = true)
+    )
+
+    // 2. When drawer is open, BACK and DPAD_RIGHT close only the drawer (never exit fullscreen blindly)
+    assertEquals(
+      TvKeyAction.CLOSE_DRAWER,
+      TvKeyEventPolicy.resolveAction(android.view.KeyEvent.KEYCODE_BACK, isFullscreen = true, isDrawerOpen = true)
+    )
+    assertEquals(
+      TvKeyAction.CLOSE_DRAWER,
+      TvKeyEventPolicy.resolveAction(android.view.KeyEvent.KEYCODE_DPAD_RIGHT, isFullscreen = true, isDrawerOpen = true)
+    )
+
+    // 3. When drawer is open, DPAD_UP/DOWN/CENTER pass directly to Compose drawer list navigation
+    assertEquals(
+      TvKeyAction.PASS_TO_COMPOSE,
+      TvKeyEventPolicy.resolveAction(android.view.KeyEvent.KEYCODE_DPAD_UP, isFullscreen = true, isDrawerOpen = true)
+    )
+    assertEquals(
+      TvKeyAction.PASS_TO_COMPOSE,
+      TvKeyEventPolicy.resolveAction(android.view.KeyEvent.KEYCODE_DPAD_DOWN, isFullscreen = true, isDrawerOpen = true)
+    )
+    assertEquals(
+      TvKeyAction.PASS_TO_COMPOSE,
+      TvKeyEventPolicy.resolveAction(android.view.KeyEvent.KEYCODE_DPAD_CENTER, isFullscreen = true, isDrawerOpen = true)
+    )
+
+    // 4. When drawer is closed, fullscreen falls through to DEFAULT channel-zap/volume/exit handlers
+    assertEquals(
+      TvKeyAction.DEFAULT,
+      TvKeyEventPolicy.resolveAction(android.view.KeyEvent.KEYCODE_DPAD_UP, isFullscreen = true, isDrawerOpen = false)
+    )
+  }
+
+  @Test
+  fun `test AmbientFrameSampler strips outer green stride borders and blurs core cleanly`() {
+    val w = 40
+    val h = 60
+    val srcPixels = IntArray(w * h)
+    val marginX = (w * 0.08f).toInt()
+    val marginY = (h * 0.08f).toInt()
+
+    // Outer 8% ring filled with bright hardware-stride green; interior filled with pure red (0xFFFF0000)
+    for (y in 0 until h) {
+      for (x in 0 until w) {
+        val isOuterRing = x < marginX || x >= (w - marginX) || y < marginY || y >= (h - marginY)
+        srcPixels[y * w + x] = if (isOuterRing) android.graphics.Color.GREEN else android.graphics.Color.RED
+      }
+    }
+
+    val (outPixels, outW, outH) = com.example.ui.components.AmbientFrameSampler.cropAndBlurPixels(
+      srcPixels = srcPixels,
+      srcW = w,
+      srcH = h,
+      cropFraction = 0.08f,
+      radius = 3
+    )
+
+    assertTrue(outW in 1 until w)
+    assertTrue(outH in 1 until h)
+    assertEquals(outW * outH, outPixels.size)
+
+    // Every single output pixel must have 0 green contamination and opaque alpha
+    for (px in outPixels) {
+      val alpha = (px ushr 24) and 0xFF
+      val red = (px ushr 16) and 0xFF
+      val green = (px ushr 8) and 0xFF
+      assertEquals(0xFF, alpha)
+      assertEquals("Outer green stride pixel leaked into ambient backdrop!", 0, green)
+      assertTrue("Expected attenuated red core, got $red", red in 200..230)
+    }
+  }
+
+  @Test
+  fun `test ChannelDao replaceAll swaps playlist atomically and background probe filter prevents zombie resurrection`() = runBlocking {
+    val dao = database.channelDao()
+    val old1 = LiveChannel(rid = "111", name = "旧频道1", title = "标题1", avatar = "", isLive = true)
+    val old2 = LiveChannel(rid = "222", name = "旧频道2", title = "标题2", avatar = "", isLive = false)
+    dao.insertAll(listOf(old1, old2))
+
+    val replacement = LiveChannel(rid = "333", name = "新频道3", title = "新标题3", avatar = "", isLive = true)
+    dao.replaceAll(listOf(replacement))
+
+    val current = dao.getAllChannels()
+    assertEquals(1, current.size)
+    assertEquals("333", current[0].rid)
+
+    // Simulate probe snapshot finishing after "111" was deleted by user
+    val probeChangedSnapshot = listOf(
+      old1.copy(title = "更新后的旧频道1"),
+      replacement.copy(title = "更新后的新频道3")
+    )
+    val safeUpdates = com.example.ui.LiveWorkbenchViewModel.filterExistingUpdatedChannels(
+      changedChannels = probeChangedSnapshot,
+      existingRids = current.map { it.rid }.toSet()
+    )
+    assertEquals(1, safeUpdates.size)
+    assertEquals("333", safeUpdates[0].rid)
+  }
+
+  @Test
+  fun `test ViewModel TV drawer toggle state and DouyinLiveEngine qualityLabel fallback`() {
+    val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+    val vm = com.example.ui.LiveWorkbenchViewModel(app)
+
+    assertFalse(vm.uiState.value.isTvChannelDrawerOpen)
+    vm.toggleTvChannelDrawer()
+    assertTrue(vm.uiState.value.isTvChannelDrawerOpen)
+
+    // Exiting fullscreen cleanly closes any open TV drawer
+    vm.setFullscreen(true)
+    vm.setTvChannelDrawerOpen(true)
+    vm.setFullscreen(false)
+    assertFalse(vm.uiState.value.isFullscreen)
+    assertFalse(vm.uiState.value.isTvChannelDrawerOpen)
+
+    assertEquals("标清 (540P)", DouyinLiveEngine.qualityLabel("sd"))
+    assertEquals("高清 (720P)", DouyinLiveEngine.qualityLabel("hd"))
+    assertEquals("画质自适应", DouyinLiveEngine.qualityLabel("unknown_key"))
+  }
 }

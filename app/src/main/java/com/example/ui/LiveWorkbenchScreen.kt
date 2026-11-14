@@ -43,6 +43,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.VolumeDown
 import androidx.compose.material.icons.automirrored.filled.VolumeMute
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
@@ -97,8 +98,10 @@ import java.util.Locale
 import kotlinx.coroutines.launch
 import com.example.R
 import com.example.ui.components.AppDialogsHost
+import com.example.ui.components.ChannelDisplayFormatter
 import com.example.ui.components.LivePlayerView
 import com.example.ui.components.MobileWorkbenchLayout
+import com.example.ui.components.TvOnlineChannelDrawer
 import com.example.ui.components.TvWorkbenchLayout
 import com.example.ui.theme.DouyinRed
 import com.example.ui.theme.StudioBg
@@ -123,9 +126,9 @@ fun LiveWorkbenchScreen(
     val isTv = remember(context) { com.example.util.DeviceEnvironment.isTvDevice(context) }
     val playerStageFocusRequester = remember { FocusRequester() }
 
-    // TV 端初始化与弹窗/全屏退出后的安全焦点恢复（防止 FocusRequester 未挂载导致异常）
-    LaunchedEffect(isTv, isFullscreen, isInPictureInPictureMode, uiState.activeDialog) {
-        if (isTv && !isFullscreen && !isInPictureInPictureMode && uiState.activeDialog == null) {
+    // TV 端初始化与弹窗/全屏/抽屉退出后的安全焦点恢复（防止 FocusRequester 未挂载导致异常）
+    LaunchedEffect(isTv, isFullscreen, isInPictureInPictureMode, uiState.activeDialog, uiState.isTvChannelDrawerOpen) {
+        if (isTv && !isFullscreen && !isInPictureInPictureMode && uiState.activeDialog == null && !uiState.isTvChannelDrawerOpen) {
             kotlinx.coroutines.delay(60L)
             try {
                 playerStageFocusRequester.requestFocus()
@@ -153,6 +156,11 @@ fun LiveWorkbenchScreen(
     BackHandler(enabled = isFullscreen) {
         viewModel.setFullscreen(false)
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+    }
+
+    // 抽屉优先返回键关闭（LIFO 注册在全屏之后：全屏下先关抽屉，不直接退全屏）
+    BackHandler(enabled = uiState.isTvChannelDrawerOpen) {
+        viewModel.setTvChannelDrawerOpen(false)
     }
 
     // 提示信息监听
@@ -614,7 +622,7 @@ fun LiveWorkbenchScreen(
                         Spacer(modifier = Modifier.width(10.dp))
                         Column {
                             Text(
-                                text = uiState.activeChannel?.name ?: "",
+                                text = ChannelDisplayFormatter.resolveBannerName(uiState.activeChannel),
                                 color = Color.White,
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold,
@@ -622,7 +630,7 @@ fun LiveWorkbenchScreen(
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = uiState.activeChannel?.title ?: "",
+                                text = ChannelDisplayFormatter.resolveBannerSubText(uiState.activeChannel),
                                 color = Color(0xFFCCCCCC),
                                 fontSize = 11.sp,
                                 maxLines = 1,
@@ -632,6 +640,42 @@ fun LiveWorkbenchScreen(
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (isTv) {
+                            var isMenuBtnFocused by remember { mutableStateOf(false) }
+                            Surface(
+                                onClick = { viewModel.setTvChannelDrawerOpen(true) },
+                                shape = RoundedCornerShape(16.dp),
+                                color = if (isMenuBtnFocused) Color(0x4400D26A) else Color(0x77000000),
+                                border = BorderStroke(
+                                    width = if (isMenuBtnFocused) 2.dp else 1.dp,
+                                    color = if (isMenuBtnFocused) Color(0xFF00D26A) else Color(0x44FFFFFF)
+                                ),
+                                modifier = Modifier
+                                    .onFocusChanged { isMenuBtnFocused = it.isFocused }
+                                    .testTag("btn_fullscreen_tv_menu")
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.List,
+                                        contentDescription = "在线直播列表",
+                                        tint = if (isMenuBtnFocused) Color(0xFF00D26A) else Color.White,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "在线直播",
+                                        color = if (isMenuBtnFocused) Color(0xFF00D26A) else Color.White,
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                        }
+
                         if (zoomScale > 1.05f) {
                             Box(
                                 modifier = Modifier
@@ -694,22 +738,39 @@ fun LiveWorkbenchScreen(
                         .padding(horizontal = 14.dp, vertical = 6.dp)
                 ) {
                     Text(
-                        text = if (isTv) "遥控器方向键上下切台 · 左右调音 · 确认键静音 · 返回键退出" else "左侧滑切台 · 右侧滑调音 · 双指放大(最高10x)",
+                        text = if (isTv) "菜单键左侧换台 · 方向键上下切台 · 左右调音 · 确认键静音 · 返回键退出" else "左侧滑切台 · 右侧滑调音 · 双指放大(最高10x)",
                         color = Color(0xCCFFFFFF),
                         fontSize = 11.5.sp
                     )
                 }
             }
+
+            // 电视遥控器菜单键左侧弹出在线直播换台抽屉（全屏模式挂载）
+            TvOnlineChannelDrawer(
+                visible = uiState.isTvChannelDrawerOpen,
+                channels = uiState.channels,
+                activeChannel = uiState.activeChannel,
+                isProbing = uiState.isProbing,
+                isTv = isTv,
+                onSelectChannel = { channel ->
+                    viewModel.playChannel(channel)
+                    viewModel.setTvChannelDrawerOpen(false)
+                    showControls = true
+                },
+                onRefresh = { viewModel.manualRefresh() },
+                onDismiss = { viewModel.setTvChannelDrawerOpen(false) }
+            )
         }
         return
     }
 
-    Scaffold(
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-        containerColor = StudioBg,
-        contentWindowInsets = WindowInsets.safeDrawing,
-        modifier = modifier
-    ) { innerPadding ->
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
+            snackbarHost = { SnackbarHost(snackbarHostState) },
+            containerColor = StudioBg,
+            contentWindowInsets = WindowInsets.safeDrawing,
+            modifier = modifier
+        ) { innerPadding ->
         BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
@@ -796,15 +857,31 @@ fun LiveWorkbenchScreen(
             }
         }
 
-        // 全局弹窗挂载
-        AppDialogsHost(
-            activeDialog = uiState.activeDialog,
-            onDismiss = { viewModel.dismissDialog() },
-            onConfirmDelete = { viewModel.deleteChannel(it) },
-            onRemoteImport = { url, mode -> viewModel.importRemoteSource(url, mode) },
-            onLocalImport = { content, mode -> viewModel.importLocalSource(content, mode) },
-            onExportSelectFormat = { viewModel.exportChannels(it) },
-            onToast = { viewModel.showToast(it) }
+            // 全局弹窗挂载
+            AppDialogsHost(
+                activeDialog = uiState.activeDialog,
+                onDismiss = { viewModel.dismissDialog() },
+                onConfirmDelete = { viewModel.deleteChannel(it) },
+                onRemoteImport = { url, mode -> viewModel.importRemoteSource(url, mode) },
+                onLocalImport = { content, mode -> viewModel.importLocalSource(content, mode) },
+                onExportSelectFormat = { viewModel.exportChannels(it) },
+                onToast = { viewModel.showToast(it) }
+            )
+        }
+
+        // 电视遥控器菜单键左侧弹出在线直播换台抽屉（大屏工作台模式挂载）
+        TvOnlineChannelDrawer(
+            visible = uiState.isTvChannelDrawerOpen,
+            channels = uiState.channels,
+            activeChannel = uiState.activeChannel,
+            isProbing = uiState.isProbing,
+            isTv = isTv,
+            onSelectChannel = { channel ->
+                viewModel.playChannel(channel)
+                viewModel.setTvChannelDrawerOpen(false)
+            },
+            onRefresh = { viewModel.manualRefresh() },
+            onDismiss = { viewModel.setTvChannelDrawerOpen(false) }
         )
     }
 }

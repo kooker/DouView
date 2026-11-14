@@ -297,6 +297,7 @@ fun AppDialogsHost(
                         OutlinedButton(
                             onClick = {
                                 try {
+                                    (context as? com.example.MainActivity)?.suppressNextTvBackgroundExit()
                                     fileLauncher.launch("*/*")
                                 } catch (_: Exception) {
                                     onToast("当前设备未提供文件选择器，请直接粘贴文本或使用远程订阅")
@@ -493,6 +494,7 @@ fun AppDialogsHost(
                         Button(
                             onClick = {
                                 try {
+                                    (context as? com.example.MainActivity)?.suppressNextTvBackgroundExit()
                                     val sendIntent: Intent = Intent().apply {
                                         action = Intent.ACTION_SEND
                                         putExtra(Intent.EXTRA_TEXT, activeDialog.content)
@@ -572,6 +574,7 @@ fun AppDialogsHost(
                     Button(
                         onClick = {
                             try {
+                                (context as? com.example.MainActivity)?.suppressNextTvBackgroundExit()
                                 val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(activeDialog.downloadUrl))
                                 context.startActivity(intent)
                             } catch (_: Exception) {
