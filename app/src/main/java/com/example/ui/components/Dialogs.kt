@@ -264,7 +264,20 @@ fun AppDialogsHost(
                 uri?.let {
                     try {
                         context.contentResolver.openInputStream(it)?.use { stream ->
-                            rawText = stream.bufferedReader().use { reader -> reader.readText() }
+                            val buf = java.io.ByteArrayOutputStream()
+                            val chunk = ByteArray(8192)
+                            var total = 0
+                            val maxBytes = 1024 * 1024
+                            while (true) {
+                                val read = stream.read(chunk)
+                                if (read <= 0) break
+                                total += read
+                                if (total > maxBytes) {
+                                    throw IllegalStateException("所选文件超过 1MB 安全上限")
+                                }
+                                buf.write(chunk, 0, read)
+                            }
+                            rawText = String(buf.toByteArray(), java.nio.charset.StandardCharsets.UTF_8)
                         }
                     } catch (e: Exception) {
                         onToast("读取文件失败: ${e.message}")

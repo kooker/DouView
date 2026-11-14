@@ -91,27 +91,35 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
+import com.example.engine.DouyinLiveEngine
 import com.example.ui.PlaybackStatus
 import com.example.ui.theme.DouyinRed
+import com.example.util.DeviceEnvironment
 
 import androidx.media3.exoplayer.LoadControl
 
 /**
- * 军工级定制直播流控策略：定制 LoadControl 扩大最小缓冲与卡顿复播缓冲时长，
- * 专抗网络抖动、弱网波动与上游 CDN 丢包，彻底消弭频繁断流与二次缓冲死循环。
+ * 定制直播流控策略：
+ * - 保持无参 create() 向下兼容
+ * - TV / 低内存盒子采用轻量紧凑缓冲（backBuffer=0，上限20s），降低内存抖动与 GC 停顿并加速起播切台
  */
 @UnstableApi
 object WorkbenchLiveLoadControlFactory {
-    fun create(): LoadControl = DefaultLoadControl.Builder()
-        .setBufferDurationsMs(
-            20000, // minBufferMs: 20s 充盈深度缓冲区，抗网络瞬断与抖动
-            60000, // maxBufferMs: 60s
-            800,   // bufferForPlaybackMs: 0.8s 极速秒开起播
-            3500   // bufferForPlaybackAfterRebufferMs: 3.5s 充盈复播，杜绝二次卡顿死循环
-        )
-        .setBackBuffer(20000, true) // 保留 20s 历史回退切片
-        .setPrioritizeTimeOverSizeThresholds(true)
-        .build()
+    fun create(): LoadControl = create(isTv = false, isLowRam = false)
+
+    fun create(isTv: Boolean, isLowRam: Boolean): LoadControl {
+        val compactMode = isTv || isLowRam
+        return DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                if (compactMode) 8000 else 15000,   // minBufferMs
+                if (compactMode) 20000 else 35000,  // maxBufferMs
+                if (compactMode) 600 else 700,      // bufferForPlaybackMs: 秒开起播
+                if (compactMode) 2500 else 3000     // bufferForPlaybackAfterRebufferMs
+            )
+            .setBackBuffer(if (compactMode) 0 else 5000, false)
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .build()
+    }
 }
 
 @OptIn(UnstableApi::class)
@@ -133,10 +141,13 @@ fun LivePlayerView(
     isTv: Boolean = false
 ) {
     val context = LocalContext.current
+    val isLowRamDevice = remember(context) { DeviceEnvironment.isLowRamDevice(context) }
     var autoRetryCount by remember { mutableIntStateOf(0) }
     var isPortraitStream by remember { mutableStateOf(false) }
     var dynamicBackgroundBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var hasRenderedFirstFrame by remember { mutableStateOf(false) }
+    var hasVideoSize by remember { mutableStateOf(false) }
+    var isExoActuallyPlaying by remember { mutableStateOf(false) }
     var isAudioOnly by remember { mutableStateOf(false) }
     var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
     val isPlaying = playbackStatus is PlaybackStatus.Playing
@@ -148,21 +159,20 @@ fun LivePlayerView(
     val currentOnBlackScreen by rememberUpdatedState(onBlackScreenDetected)
     val currentOnAspectRatio by rememberUpdatedState(onVideoAspectRatioChanged)
 
-    // 创建配置解码器自动降级、低延时快速缓冲与防跨域/Referer 拦截的 ExoPlayer 实例
-    val exoPlayer = remember {
+    // 创建配置解码器自动降级、低延时快速缓冲与严格 HTTPS 传输安全策略的 ExoPlayer 实例
+    val exoPlayer = remember(isTv, isLowRamDevice) {
         val renderersFactory = DefaultRenderersFactory(context)
-            .setEnableDecoderFallback(true) // 关键：开启解码器自动降级（硬件不支持时自动回落软解，消除解码异常）
+            .setEnableDecoderFallback(true) // 开启解码器自动降级（硬件不支持时自动回落软解）
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
             .setAllowedVideoJoiningTimeMs(5000)
 
-        // 使用军工级定制 WorkbenchLiveLoadControl
-        val loadControl = WorkbenchLiveLoadControlFactory.create()
+        val loadControl = WorkbenchLiveLoadControlFactory.create(isTv = isTv, isLowRam = isLowRamDevice)
 
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
             .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-            .setConnectTimeoutMs(10000)
-            .setReadTimeoutMs(30000)
-            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(8000)
+            .setReadTimeoutMs(20000)
+            .setAllowCrossProtocolRedirects(false) // 禁止 HTTPS -> HTTP 跨协议降级重定向
             .setDefaultRequestProperties(
                 mapOf(
                     "Referer" to "https://live.douyin.com/"
@@ -234,6 +244,7 @@ fun LivePlayerView(
                     events.contains(Player.EVENT_PLAYBACK_STATE_CHANGED)
                 ) {
                     if (player.videoSize.width > 0 && player.videoSize.height > 0) {
+                        hasVideoSize = true
                         hasRenderedFirstFrame = true
                         isAudioOnly = false // 侦测到视频尺寸，坚决消除语音直播误判
                     }
@@ -272,20 +283,26 @@ fun LivePlayerView(
                         autoRetryCount = 0
                         currentOnPlaybackStateChanged(PlaybackStatus.Playing)
                         if (exoPlayer.videoSize.width > 0 && exoPlayer.videoSize.height > 0) {
+                            hasVideoSize = true
                             hasRenderedFirstFrame = true
                         }
                     }
                     Player.STATE_ENDED -> {
+                        isExoActuallyPlaying = false
                         currentOnPlaybackStateChanged(PlaybackStatus.Offline("直播信号已结束"))
                     }
-                    Player.STATE_IDLE -> {}
+                    Player.STATE_IDLE -> {
+                        isExoActuallyPlaying = false
+                    }
                 }
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                isExoActuallyPlaying = isPlaying
                 if (isPlaying) {
                     currentOnPlaybackStateChanged(PlaybackStatus.Playing)
                     if (exoPlayer.videoSize.width > 0 && exoPlayer.videoSize.height > 0) {
+                        hasVideoSize = true
                         hasRenderedFirstFrame = true
                     }
                 }
@@ -293,6 +310,7 @@ fun LivePlayerView(
 
             override fun onVideoSizeChanged(videoSize: VideoSize) {
                 if (videoSize.width > 0 && videoSize.height > 0) {
+                    hasVideoSize = true
                     val isPortrait = videoSize.height > videoSize.width
                     isPortraitStream = isPortrait
                     currentOnAspectRatio(isPortrait)
@@ -375,24 +393,26 @@ fun LivePlayerView(
         } catch (_: Exception) {}
     }
 
-    // 毫秒级多维出帧高频侦测守护，确保一旦底层真正输出视频画面（videoSize > 0）才消除黑屏标记，避免被纯音频时钟推进误导
+    // 低开销出帧兜底守护（主路径已由 Player.Listener 零延迟响应）
     LaunchedEffect(playbackUrl, isPlaying) {
         if (playbackUrl.isNullOrEmpty()) return@LaunchedEffect
-        while (isActive) {
+        while (isActive && !hasRenderedFirstFrame) {
             val isPlaybackActive = exoPlayer.isPlaying || exoPlayer.playbackState == Player.STATE_READY
             val hasVideoOutput = (exoPlayer.videoSize.width > 0 && exoPlayer.videoSize.height > 0) || isAudioOnly
             if (isPlaybackActive && hasVideoOutput) {
+                hasVideoSize = exoPlayer.videoSize.width > 0
+                isExoActuallyPlaying = exoPlayer.isPlaying
                 hasRenderedFirstFrame = true
                 break
             }
-            delay(100L)
+            delay(250L)
         }
     }
 
     // 极端断流自愈守护进程：若长时间卡在缓冲或连接状态，主动微调向直播最新头追赶
     LaunchedEffect(playbackUrl, playbackStatus) {
         if (!playbackUrl.isNullOrEmpty() && (playbackStatus is PlaybackStatus.Buffering || playbackStatus is PlaybackStatus.Connecting)) {
-            kotlinx.coroutines.delay(7500L)
+            delay(7500L)
             if (playbackStatus is PlaybackStatus.Buffering || playbackStatus is PlaybackStatus.Connecting) {
                 exoPlayer.seekToDefaultPosition()
                 exoPlayer.prepare()
@@ -401,14 +421,17 @@ fun LivePlayerView(
         }
     }
 
-    // 流地址变化时载入
+    // 流地址变化时载入（仅放行校验通过的 HTTPS 安全流地址）
     LaunchedEffect(playbackUrl) {
         dynamicBackgroundBitmap = null
         hasRenderedFirstFrame = false
+        hasVideoSize = false
+        isExoActuallyPlaying = false
         isAudioOnly = false
         autoRetryCount = 0
-        if (!playbackUrl.isNullOrEmpty()) {
-            val mediaItem = MediaItem.fromUri(playbackUrl)
+        val safeStreamUrl = DouyinLiveEngine.sanitizeHttpUrl(playbackUrl)
+        if (!safeStreamUrl.isNullOrEmpty()) {
+            val mediaItem = MediaItem.fromUri(safeStreamUrl)
             exoPlayer.setMediaItem(mediaItem)
             exoPlayer.prepare()
             exoPlayer.play()
@@ -475,41 +498,47 @@ fun LivePlayerView(
         }
     }
 
-    // 播放器高清晰度视频动态背景抽取进程：针对竖屏直播以 ~16 fps 高帧率动态采样实况画面，消除绿边并 100% 满幅铺满（息屏或后台状态主动休眠）
-    LaunchedEffect(isPlaying, isPortraitStream, hasRenderedFirstFrame, isScreenOffAudioMode, isLifecycleBackground) {
-        if (isPlaying && isPortraitStream && hasRenderedFirstFrame && !isScreenOffAudioMode && !isLifecycleBackground) {
+    // 播放器轻量级动态背景采样进程：
+    // - TV 端与低内存设备禁用 GPU->Bitmap 回读采样（复用已加载的主播头像模糊光影，彻底节省 CPU/显存带宽）
+    // - 移动端采用 280p 轻量双缓冲 + ~9fps 采样，并在协程退出时及时回收 native Bitmap 杜绝泄漏
+    LaunchedEffect(isPlaying, isPortraitStream, hasRenderedFirstFrame, isScreenOffAudioMode, isLifecycleBackground, isTv, isLowRamDevice) {
+        if (!isTv && !isLowRamDevice && isPlaying && isPortraitStream && hasRenderedFirstFrame && !isScreenOffAudioMode && !isLifecycleBackground) {
             var currentBufferW = 0
             var currentBufferH = 0
             var bufferBmps: Array<Bitmap>? = null
             var frameIndex = 0
-
-            while (isActive) {
-                try {
-                    val textureView = playerViewRef?.videoSurfaceView as? TextureView
-                    if (textureView != null && textureView.isAvailable) {
-                        val tvW = textureView.width
-                        val tvH = textureView.height
-                        if (tvW > 0 && tvH > 0) {
-                            // 动态锁定视频实况原生高宽比，避免非对齐导致的右侧绿色未绘制显存条带
-                            val targetH = 480
-                            val targetW = ((targetH.toFloat() * tvW) / tvH).toInt().coerceIn(160, 854)
-                            if (bufferBmps == null || currentBufferW != targetW || currentBufferH != targetH) {
-                                currentBufferW = targetW
-                                currentBufferH = targetH
-                                bufferBmps = arrayOf(
-                                    Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888),
-                                    Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-                                )
+            try {
+                while (isActive) {
+                    try {
+                        val textureView = playerViewRef?.videoSurfaceView as? TextureView
+                        if (textureView != null && textureView.isAvailable) {
+                            val tvW = textureView.width
+                            val tvH = textureView.height
+                            if (tvW > 0 && tvH > 0) {
+                                val targetH = 280
+                                val targetW = ((targetH.toFloat() * tvW) / tvH).toInt().coerceIn(120, 500)
+                                if (bufferBmps == null || currentBufferW != targetW || currentBufferH != targetH) {
+                                    bufferBmps?.forEach { if (!it.isRecycled) it.recycle() }
+                                    currentBufferW = targetW
+                                    currentBufferH = targetH
+                                    bufferBmps = arrayOf(
+                                        Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888),
+                                        Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+                                    )
+                                }
+                                val targetBmp = bufferBmps[frameIndex % 2]
+                                targetBmp.eraseColor(android.graphics.Color.BLACK)
+                                textureView.getBitmap(targetBmp)
+                                dynamicBackgroundBitmap = targetBmp
+                                frameIndex++
                             }
-                            val targetBmp = bufferBmps[frameIndex % 2]
-                            targetBmp.eraseColor(android.graphics.Color.BLACK) // 确保显存缓冲初始化为黑色，彻底绝缘绿色未写入条带
-                            textureView.getBitmap(targetBmp)
-                            dynamicBackgroundBitmap = targetBmp
-                            frameIndex++
                         }
-                    }
-                } catch (_: Exception) {}
-                delay(60L) // 约 16 fps 流畅高刷动态背景
+                    } catch (_: Exception) {}
+                    delay(110L)
+                }
+            } finally {
+                dynamicBackgroundBitmap = null
+                bufferBmps?.forEach { if (!it.isRecycled) it.recycle() }
             }
         } else {
             dynamicBackgroundBitmap = null
@@ -618,7 +647,7 @@ fun LivePlayerView(
         )
 
         // 纯音频 / 语音电台实况播放徽标（仅在非息屏/非后台模式且确实完全无视频轨时展示，彻底绝缘误判）
-        val showAudioOnlyBadge = isAudioOnly && isPlaying && !isScreenOffAudioMode && !isLifecycleBackground && exoPlayer.videoSize.width == 0
+        val showAudioOnlyBadge = isAudioOnly && isPlaying && !isScreenOffAudioMode && !isLifecycleBackground && !hasVideoSize
         if (showAudioOnlyBadge) {
             Box(
                 modifier = Modifier
@@ -647,7 +676,7 @@ fun LivePlayerView(
         }
 
         // 浮层遮罩：仅在未开播、明确错误、连接中或显式缓冲时呈现清晰优雅的加载状态（播放中且已出帧/已实际播放时不遮挡）
-        val shouldShowLoadingOverlay = (playbackStatus !is PlaybackStatus.Playing || (!hasRenderedFirstFrame && !exoPlayer.isPlaying)) && !isAudioOnly
+        val shouldShowLoadingOverlay = (playbackStatus !is PlaybackStatus.Playing || (!hasRenderedFirstFrame && !isExoActuallyPlaying)) && !isAudioOnly
         AnimatedVisibility(
             visible = shouldShowLoadingOverlay,
             enter = fadeIn(tween(150)),

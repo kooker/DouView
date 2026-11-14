@@ -120,14 +120,7 @@ fun LiveWorkbenchScreen(
     var inputText by remember { mutableStateOf("") }
 
     // 智能识别当前运行宿主是否为 Android TV / 电视盒子
-    val isTv = remember {
-        val uiModeManager = context.getSystemService(android.content.Context.UI_MODE_SERVICE) as? android.app.UiModeManager
-        val isUiModeTv = uiModeManager?.currentModeType == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
-        val hasLeanback = context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
-        @Suppress("DEPRECATION")
-        val hasTv = context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_TELEVISION)
-        isUiModeTv || hasLeanback || hasTv
-    }
+    val isTv = remember(context) { com.example.util.DeviceEnvironment.isTvDevice(context) }
     val playerStageFocusRequester = remember { FocusRequester() }
 
     // TV 端初始化与弹窗/全屏退出后的安全焦点恢复（防止 FocusRequester 未挂载导致异常）
@@ -140,14 +133,14 @@ fun LiveWorkbenchScreen(
         }
     }
 
-    // 本地文件选择器（TXT / CSV / JSON 文件导入）
+    // 本地文件选择器（TXT / CSV / JSON 文件导入，限制最大 1MB 防止 OOM）
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri ->
         uri?.let {
             try {
                 context.contentResolver.openInputStream(it)?.use { stream ->
-                    val content = stream.bufferedReader().use { reader -> reader.readText() }
+                    val content = readBoundedUtf8Text(stream, maxBytes = 1024 * 1024)
                     viewModel.importLocalSource(content, ImportMode.MERGE)
                 }
             } catch (e: Exception) {
@@ -822,4 +815,20 @@ internal object TvSafeArea {
     fun fullscreenHudHorizontal(isTv: Boolean): Dp = if (isTv) 48.dp else 16.dp
     fun fullscreenHudVertical(isTv: Boolean): Dp = if (isTv) 28.dp else 20.dp
     fun fullscreenBottomHint(isTv: Boolean): Dp = if (isTv) 32.dp else 24.dp
+}
+
+internal fun readBoundedUtf8Text(input: java.io.InputStream, maxBytes: Int = 1024 * 1024): String {
+    val buf = java.io.ByteArrayOutputStream()
+    val chunk = ByteArray(8192)
+    var total = 0
+    while (true) {
+        val read = input.read(chunk)
+        if (read <= 0) break
+        total += read
+        if (total > maxBytes) {
+            throw IllegalStateException("所选文件超过 ${maxBytes / 1024}KB 安全上限")
+        }
+        buf.write(chunk, 0, read)
+    }
+    return String(buf.toByteArray(), java.nio.charset.StandardCharsets.UTF_8)
 }

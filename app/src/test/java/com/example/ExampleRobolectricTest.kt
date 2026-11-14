@@ -644,4 +644,109 @@ class ExampleRobolectricTest {
     assertEquals("实况直播中", resolvedSub)
     assertFalse(resolvedSub.contains("171612155041"))
   }
+
+  @Test
+  fun `test TV startup locks SD 540P quality first while Mobile keeps HD and TV manual switch overrides`() {
+    val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+    val vm = com.example.ui.LiveWorkbenchViewModel(app)
+
+    val allQualities = mapOf(
+      "origin" to com.example.engine.QualityStream("原画 (1080P60)", "https://flv/origin", "https://hls/origin"),
+      "uhd" to com.example.engine.QualityStream("超清 (1080P)", "https://flv/uhd", "https://hls/uhd"),
+      "hd" to com.example.engine.QualityStream("高清 (720P)", "https://flv/hd", "https://hls/hd"),
+      "sd" to com.example.engine.QualityStream("标清 (540P)", "https://flv/sd", "https://hls/sd"),
+      "ld" to com.example.engine.QualityStream("流畅", "https://flv/ld", "https://hls/ld")
+    )
+
+    // TV initial startup lock MUST choose "sd" (标清 540P) even when preferred passed is "hd"
+    assertEquals(
+      "sd",
+      vm.selectQualityForDeviceForTest(allQualities, preferred = "hd", isTv = true, lockTvInitialSd = true)
+    )
+    // When TV falls back without sd, prioritize lower load "ld" before "hd"
+    val withoutSd = allQualities.filterKeys { it != "sd" }
+    assertEquals(
+      "ld",
+      vm.selectQualityForDeviceForTest(withoutSd, preferred = "sd", isTv = true, lockTvInitialSd = true)
+    )
+    // Handheld mobile keeps HD first
+    assertEquals(
+      "hd",
+      vm.selectQualityForDeviceForTest(allQualities, preferred = "hd", isTv = false, lockTvInitialSd = false)
+    )
+
+    // TV user manual changeQuality unlocks and switches cleanly to chosen quality
+    val streamData = com.example.engine.LiveStreamData(
+      rid = "171612155041",
+      isLive = true,
+      statusKnown = true,
+      name = "茉莉·molly",
+      title = "迷人的笑脸吸引视线",
+      avatar = "",
+      streams = allQualities
+    )
+    vm.seedPlaybackForTest(streamData, selectedQuality = "sd", selectedProtocol = "hls")
+    vm.changeQuality("hd", isManual = true)
+    assertEquals("hd", vm.uiState.value.selectedQuality)
+    assertEquals("https://hls/hd", vm.uiState.value.playbackUrl)
+  }
+
+  @Test
+  @Config(qualifiers = "television")
+  fun `test TV device configuration initializes ViewModel selectedQuality to sd 540P`() {
+    val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+    assertTrue(com.example.util.DeviceEnvironment.isTvDevice(app))
+    val vm = com.example.ui.LiveWorkbenchViewModel(app)
+    assertEquals("sd", vm.uiState.value.selectedQuality)
+  }
+
+  @Test
+  fun `test remote URL validation blocks insecure protocols SSRF private IPs and credentials`() {
+    // Valid HTTPS external source succeeds
+    assertEquals(
+      "https://example.com/channels.json",
+      DouyinLiveEngine.validateRemoteImportUrl("https://example.com/channels.json")
+    )
+
+    // Blocked schemes / SSRF hosts / credentials
+    val invalidUrls = listOf(
+      "http://example.com/channels.json",
+      "file:///etc/passwd",
+      "javascript:alert(1)",
+      "https://user:pass@example.com/list.json",
+      "https://localhost/list.json",
+      "https://127.0.0.1/list.json",
+      "https://169.254.169.254/latest/meta-data/",
+      "https://192.168.1.10/list.json",
+      "https://10.0.0.5/list.json",
+      "https://172.16.0.1/list.json",
+      "https://[::1]/list.json"
+    )
+    for (badUrl in invalidUrls) {
+      var rejected = false
+      try {
+        DouyinLiveEngine.validateRemoteImportUrl(badUrl)
+      } catch (_: IllegalArgumentException) {
+        rejected = true
+      }
+      assertTrue("Expected SSRF/insecure URL to be rejected: $badUrl", rejected)
+    }
+
+    // sanitizeHttpUrl upgrades http->https and drops unsafe schemes
+    assertEquals("https://cdn.douyin.com/live.flv", DouyinLiveEngine.sanitizeHttpUrl("http://cdn.douyin.com/live.flv"))
+    assertEquals(null, DouyinLiveEngine.sanitizeHttpUrl("javascript:alert(1)"))
+    assertEquals(null, DouyinLiveEngine.sanitizeHttpUrl("file:///sdcard/a.flv"))
+    assertEquals(null, DouyinLiveEngine.sanitizeHttpUrl("data:text/html,hi"))
+  }
+
+  @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+  @Test
+  fun `test WorkbenchLiveLoadControlFactory creates compact TV and standard handheld configs`() {
+    val defaultCtrl = com.example.ui.components.WorkbenchLiveLoadControlFactory.create()
+    val tvCtrl = com.example.ui.components.WorkbenchLiveLoadControlFactory.create(isTv = true, isLowRam = true)
+    assertNotNull(defaultCtrl)
+    assertNotNull(tvCtrl)
+    assertEquals(0L, tvCtrl.getBackBufferDurationUs(androidx.media3.exoplayer.analytics.PlayerId.UNSET))
+    assertEquals(5_000_000L, defaultCtrl.getBackBufferDurationUs(androidx.media3.exoplayer.analytics.PlayerId.UNSET))
+  }
 }

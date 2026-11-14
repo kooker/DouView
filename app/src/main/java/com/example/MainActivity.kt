@@ -25,11 +25,13 @@ import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import com.example.ui.LiveWorkbenchScreen
 import com.example.ui.LiveWorkbenchViewModel
 import com.example.ui.PlaybackStatus
 import com.example.ui.theme.DoumouLiveTheme
+import com.example.util.DeviceEnvironment
 
 class MainActivity : ComponentActivity() {
 
@@ -62,14 +64,7 @@ class MainActivity : ComponentActivity() {
     /**
      * 毫秒级双重设备指纹嗅探：判定当前宿主是否为 Android TV / 当贝 / 投影仪 / 电视盒子
      */
-    private fun isTvDevice(): Boolean {
-        val uiModeManager = getSystemService(UI_MODE_SERVICE) as? UiModeManager
-        val isUiModeTv = uiModeManager?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION
-        val hasLeanbackFeature = packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
-        @Suppress("DEPRECATION")
-        val hasTvFeature = packageManager.hasSystemFeature(PackageManager.FEATURE_TELEVISION)
-        return isUiModeTv || hasLeanbackFeature || hasTvFeature
-    }
+    private fun isTvDevice(): Boolean = DeviceEnvironment.isTvDevice(this)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -93,7 +88,12 @@ class MainActivity : ComponentActivity() {
             addAction(Intent.ACTION_SCREEN_OFF)
             addAction(Intent.ACTION_SCREEN_ON)
         }
-        registerReceiver(screenStateReceiver, screenFilter)
+        ContextCompat.registerReceiver(
+            this,
+            screenStateReceiver,
+            screenFilter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
 
         setContent {
             DoumouLiveTheme {

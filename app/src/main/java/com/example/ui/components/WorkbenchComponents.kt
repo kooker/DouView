@@ -70,29 +70,29 @@ import com.example.ui.theme.StudioText
 internal val TvFocusGreen = Color(0xFF00D26A)
 
 internal object ChannelDisplayFormatter {
+    private val PLACEHOLDER_NAME_REGEX = Regex("^(?:频道|房间)\\s*\\d{3,22}$")
+    private val PLACEHOLDER_TITLE_REGEX = Regex("^(?:房间号?|频道)\\s*[:：]?\\s*\\d+.*$")
+
     fun resolveBannerName(activeChannel: LiveChannel?): String {
         if (activeChannel == null) return "请选择直播间"
-        return if (
-            activeChannel.name.isNotBlank() &&
-            activeChannel.name != activeChannel.rid &&
-            !activeChannel.name.matches(Regex("^(?:频道|房间)\\s*\\d{3,22}$"))
-        ) {
-            activeChannel.name
-        } else if (
-            activeChannel.title.isNotBlank() &&
-            !activeChannel.title.matches(Regex("^(?:房间号?|频道)\\s*[:：]?\\s*\\d+.*$"))
-        ) {
-            activeChannel.title
-        } else {
-            activeChannel.name.ifBlank { "请选择直播间" }
+        return resolveChannelName(activeChannel)
+    }
+
+    fun resolveChannelName(channel: LiveChannel): String {
+        val rawName = channel.name.trim()
+        val rawTitle = channel.title.trim()
+        return when {
+            rawName.isNotEmpty() && rawName != channel.rid && !rawName.matches(PLACEHOLDER_NAME_REGEX) -> rawName
+            rawTitle.isNotEmpty() && !rawTitle.matches(PLACEHOLDER_TITLE_REGEX) -> rawTitle
+            else -> "抖音主播"
         }
     }
 
     fun resolveBannerSubText(activeChannel: LiveChannel?): String {
+        if (activeChannel == null) return "从下方列表中点击频道开始播放"
+        val rawTitle = activeChannel.title.trim()
         return when {
-            activeChannel == null -> "从下方列表中点击频道开始播放"
-            activeChannel.title.isNotEmpty() &&
-                !activeChannel.title.matches(Regex("^(?:房间号?|频道)\\s*[:：]?\\s*\\d+.*$")) -> activeChannel.title
+            rawTitle.isNotEmpty() && !rawTitle.matches(PLACEHOLDER_TITLE_REGEX) -> rawTitle
             activeChannel.isLive -> "实况直播中"
             !activeChannel.statusKnown -> "正在核验开播状态..."
             else -> "主播暂未开播"

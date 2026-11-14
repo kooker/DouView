@@ -9,6 +9,7 @@ import com.example.data.ChannelRepository
 import com.example.engine.DouyinLiveEngine
 import com.example.engine.LiveStreamData
 import com.example.engine.QualityStream
+import com.example.util.DeviceEnvironment
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -88,10 +89,20 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
             "md",      // 极速
             "default"  // 默认 (最低负载)
         )
+
+        private val REGEX_PLACEHOLDER_NAME = Regex("^(?:频道|房间)\\s*\\d{3,22}$")
+        private val REGEX_RID_EXACT = Regex("\\d{3,22}")
+        private val REGEX_RID_TOKEN = Regex("\\b(\\d{3,22})\\b")
+        private val REGEX_CONTROL_CHARS = Regex("[\\u0000-\\u001F\\u007F]")
+        private const val MAX_IMPORT_CHANNELS = 500
     }
 
+    private val isTvDevice: Boolean = DeviceEnvironment.isTvDevice(application)
     private val repository: ChannelRepository
-    private val _uiState = MutableStateFlow(WorkbenchUiState())
+    // TV 端首次起播默认锁定标清 540P ("sd")，兼顾秒开与低端盒子稳定解码；手机端保持高清 ("hd")
+    private val _uiState = MutableStateFlow(
+        WorkbenchUiState(selectedQuality = if (isTvDevice) "sd" else "hd")
+    )
     val uiState: StateFlow<WorkbenchUiState> = _uiState.asStateFlow()
 
     private var probeJob: Job? = null
@@ -105,6 +116,7 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
     private var lastDegradeTimestamp = 0L
     private var hasInitialAutoPlayed = false
     private var hasUserInteracted = false
+    private var hasManuallyChangedQuality = false
 
     init {
         val database = AppDatabase.getDatabase(application)
@@ -159,16 +171,22 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
                 var streamData = DouyinLiveEngine.fetchRoomInfo(channel.rid, ignoreCache = forceRefresh)
                 if (currentToken != playToken) return@launch
 
+                val shouldLockTvSd = isTvDevice && !hasManuallyChangedQuality
                 // 若 fetchRoomInfo 未抓到流或返回空，通过 fetchLiveStreams 双重兜底
                 if (streamData == null || (streamData.isLive && streamData.streams.isEmpty())) {
-                    val fallbackStreams = DouyinLiveEngine.fetchLiveStreams(channel.rid)
+                    val fallbackStreams = DouyinLiveEngine.fetchLiveStreams(
+                        webRid = channel.rid,
+                        preferSd = shouldLockTvSd
+                    )
                     if (fallbackStreams != null && fallbackStreams.isNotEmpty()) {
                         val qualityMap = mutableMapOf<String, QualityStream>()
+                        val fallbackKey = if (shouldLockTvSd) "sd" else "hd"
+                        val fallbackLabel = if (shouldLockTvSd) "标清 (540P)" else "高清 (720P)"
                         fallbackStreams["hls"]?.let { hlsUrl ->
-                            qualityMap["hd"] = QualityStream("高清 (720P)", fallbackStreams["flv"], hlsUrl)
+                            qualityMap[fallbackKey] = QualityStream(fallbackLabel, fallbackStreams["flv"], hlsUrl)
                         }
                         if (qualityMap.isEmpty() && fallbackStreams["flv"] != null) {
-                            qualityMap["hd"] = QualityStream("高清 (720P)", fallbackStreams["flv"], null)
+                            qualityMap[fallbackKey] = QualityStream(fallbackLabel, fallbackStreams["flv"], null)
                         }
                         streamData = LiveStreamData(
                             rid = channel.rid,
@@ -208,7 +226,12 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
                     repository.insertOrUpdate(updated)
 
                     if (streamData.isLive && streamData.streams.isNotEmpty()) {
-                        val chosenQuality = selectBestQuality(streamData.streams, _uiState.value.selectedQuality)
+                        val chosenQuality = selectBestQuality(
+                            streams = streamData.streams,
+                            preferred = _uiState.value.selectedQuality,
+                            isTv = isTvDevice,
+                            lockTvInitialSd = shouldLockTvSd
+                        )
                         val chosenProtocol = _uiState.value.selectedProtocol
                         val playUrl = pickStreamUrl(streamData.streams[chosenQuality], chosenProtocol)
                             ?: streamData.streams.values.firstNotNullOfOrNull { it.hls ?: it.flv }
@@ -224,8 +247,12 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
                                 )
                             }
                         } else {
-                            // 降级选择其他可播放清晰度（仍按保守顺序优先 hd/sd，避免选中 origin）
-                            val conservativeOrder = listOf("hd", "sd", "uhd", "ld", "md", "default", "origin")
+                            // 降级选择其他可播放清晰度：TV 端优先标清 540P，手机端优先高清 720P，原画始终置末
+                            val conservativeOrder = if (isTvDevice) {
+                                listOf("sd", "ld", "md", "hd", "default", "uhd", "origin")
+                            } else {
+                                listOf("hd", "sd", "uhd", "ld", "md", "default", "origin")
+                            }
                             val fallbackPair = conservativeOrder.firstNotNullOfOrNull { qKey ->
                                 pickStreamUrl(streamData.streams[qKey], chosenProtocol)?.let { url -> qKey to url }
                             } ?: streamData.streams.entries.firstNotNullOfOrNull { (qKey, s) ->
@@ -293,10 +320,24 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
         }
     }
 
-    private fun selectBestQuality(streams: Map<String, QualityStream>, preferred: String): String {
+    private fun selectBestQuality(
+        streams: Map<String, QualityStream>,
+        preferred: String,
+        isTv: Boolean = false,
+        lockTvInitialSd: Boolean = false
+    ): String {
+        if (isTv && lockTvInitialSd && streams.containsKey("sd")) {
+            return "sd"
+        }
         if (streams.containsKey(preferred)) return preferred
-        // 默认选流保守策略：优先匹配高清 (hd) / 标清 (sd)，将原画 (origin) 置于最末位，显著降低低端机/盒子首次即原画黑屏的概率
-        val priority = listOf("hd", "sd", "uhd", "ld", "md", "default", "origin")
+        // 默认选流保守策略：
+        // - TV 端首次起播优先锁定标清 540P (sd)，其次流畅/中清/高清，原画置末，降低电视盒子硬解卡顿黑屏风险
+        // - 移动端优先匹配高清 (hd) / 标清 (sd)，同样将原画 (origin) 置于最末位
+        val priority = if (isTv) {
+            listOf("sd", "ld", "md", "hd", "default", "uhd", "origin")
+        } else {
+            listOf("hd", "sd", "uhd", "ld", "md", "default", "origin")
+        }
         return priority.firstOrNull { streams.containsKey(it) } ?: streams.keys.firstOrNull() ?: "default"
     }
 
@@ -311,6 +352,7 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
 
     fun changeQuality(qualityKey: String, isManual: Boolean = true) {
         if (isManual) {
+            hasManuallyChangedQuality = true
             autoDegradeCount = 0
             attemptedDegradeQualities.clear()
             attemptedStreamCombinations.clear()
@@ -569,6 +611,14 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
         preferred: String = "hd"
     ): String = selectBestQuality(streams, preferred)
 
+    @androidx.annotation.VisibleForTesting
+    internal fun selectQualityForDeviceForTest(
+        streams: Map<String, QualityStream>,
+        preferred: String = "sd",
+        isTv: Boolean = true,
+        lockTvInitialSd: Boolean = true
+    ): String = selectBestQuality(streams, preferred, isTv = isTv, lockTvInitialSd = lockTvInitialSd)
+
     /**
      * 彻底停止播放并释放解码与网络资源（退出应用时调用，释放后台资源）
      */
@@ -708,12 +758,12 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
     private fun isPlaceholderName(name: String?, rid: String): Boolean {
         val v = name?.trim() ?: ""
         if (v.isEmpty() || v == "抖音主播" || v == "精彩直播" || v == "已导入频道") return true
-        return v.matches(Regex("^(?:频道|房间)\\s*\\d{3,22}$")) || v == rid
+        return v.matches(REGEX_PLACEHOLDER_NAME) || v == rid
     }
 
     private fun isPlaceholderTitle(title: String?): Boolean {
         val v = title?.trim() ?: ""
-        return v.isEmpty() || v in listOf("已导入频道", "精彩直播", "直播间", "未知直播", "当前未开播")
+        return v.isEmpty() || v == "已导入频道" || v == "精彩直播" || v == "直播间" || v == "未知直播" || v == "当前未开播"
     }
 
     private suspend fun probeAllChannelsInternal() = withContext(Dispatchers.IO) {
@@ -897,9 +947,13 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
         }
     }
 
+    private fun sanitizeImportedText(raw: String, maxLen: Int): String {
+        return raw.replace(REGEX_CONTROL_CHARS, "").trim().take(maxLen)
+    }
+
     private fun parseChannelsFromText(text: String): List<LiveChannel> {
         val result = mutableListOf<LiveChannel>()
-        val trimmed = text.trim()
+        val trimmed = text.trim().take(1024 * 1024)
         val now = System.currentTimeMillis()
         if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
             try {
@@ -909,12 +963,13 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
                     val obj = JSONObject(trimmed)
                     obj.optJSONArray("list") ?: JSONArray()
                 }
-                for (i in 0 until array.length()) {
+                val limit = minOf(array.length(), MAX_IMPORT_CHANNELS)
+                for (i in 0 until limit) {
                     val item = array.optJSONObject(i) ?: continue
-                    val rid = item.optString("rid").ifEmpty { item.optString("id") }
-                    if (rid.isNotEmpty() && rid.matches(Regex("\\d{3,22}"))) {
-                        val rawName = item.optString("name").trim()
-                        val rawTitle = item.optString("title").trim()
+                    val rid = item.optString("rid").ifEmpty { item.optString("id") }.trim()
+                    if (rid.isNotEmpty() && rid.matches(REGEX_RID_EXACT)) {
+                        val rawName = sanitizeImportedText(item.optString("name"), 50)
+                        val rawTitle = sanitizeImportedText(item.optString("title"), 100)
                         val name = if (rawName.isNotEmpty() && !isPlaceholderName(rawName, rid)) {
                             rawName
                         } else if (rawTitle.isNotEmpty() && !isPlaceholderTitle(rawTitle)) {
@@ -923,7 +978,7 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
                             "抖音主播"
                         }
                         val title = if (rawTitle.isNotEmpty() && !isPlaceholderTitle(rawTitle)) rawTitle else "已导入频道"
-                        val avatar = item.optString("avatar", "")
+                        val avatar = DouyinLiveEngine.sanitizeHttpUrl(item.optString("avatar", "")) ?: ""
                         val isLive = item.optBoolean("isLive", false)
                         result.add(
                             LiveChannel(
@@ -943,19 +998,20 @@ class LiveWorkbenchViewModel(application: Application) : AndroidViewModel(applic
             } catch (_: Exception) {}
         }
 
-        // CSV or TXT per line
+        // CSV or TXT per line (上限 MAX_IMPORT_CHANNELS 条防 DoS)
         val lines = trimmed.lines()
         var lineIndex = 0
         for (line in lines) {
+            if (result.size >= MAX_IMPORT_CHANNELS) break
             val l = line.trim()
             if (l.isEmpty() || l.startsWith("#")) continue
             val parts = l.split(",")
             val candidateRid = parts[0].trim()
-            val m = Regex("\\b(\\d{3,22})\\b").find(candidateRid)
+            val m = REGEX_RID_TOKEN.find(candidateRid)
             if (m != null) {
                 val rid = m.value
-                val rawName = if (parts.size > 1) parts[1].trim() else ""
-                val rawTitle = if (parts.size > 2) parts[2].trim() else ""
+                val rawName = if (parts.size > 1) sanitizeImportedText(parts[1], 50) else ""
+                val rawTitle = if (parts.size > 2) sanitizeImportedText(parts[2], 100) else ""
                 val name = if (rawName.isNotEmpty() && !isPlaceholderName(rawName, rid)) {
                     rawName
                 } else if (rawTitle.isNotEmpty() && !isPlaceholderTitle(rawTitle)) {

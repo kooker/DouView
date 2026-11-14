@@ -2,13 +2,24 @@ package com.example.engine
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.ConnectionPool
+import okhttp3.Dispatcher
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import okhttp3.ResponseBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.net.Inet4Address
+import java.net.Inet6Address
+import java.net.InetAddress
+import java.net.URI
 import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
 
@@ -34,9 +45,28 @@ object DouyinLiveEngine {
     private const val UA_MOBILE =
         "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
 
+    private const val MAX_API_BODY_BYTES = 2 * 1024 * 1024
+    private const val MAX_REMOTE_SOURCE_BYTES = 1024 * 1024
+    private const val MAX_CACHE_ENTRIES = 128
+    private const val STREAM_CACHE_TTL = 20_000L
+
+    private val PATTERN_SHORT_URL = Pattern.compile("https?://v\\.douyin\\.com/[A-Za-z0-9_-]+/?")
+    private val PATTERN_WEB_URL = Pattern.compile("(?:live\\.douyin\\.com/|follow/live/)(\\d{3,22})")
+    private val PATTERN_DIGITS = Pattern.compile("\\b(\\d{3,22})\\b")
+    private val PATTERN_TTWID = Pattern.compile("ttwid=([^;\\s]+)")
+    private val PATTERN_REDIRECT_RID = Pattern.compile("(?:reflow/|room_id=|live\\.douyin\\.com/)(\\d{15,22}|\\d{3,14})")
+
+    private val sharedDispatcher = Dispatcher().apply {
+        maxRequests = 16
+        maxRequestsPerHost = 6
+    }
+
     private val httpClient = OkHttpClient.Builder()
+        .dispatcher(sharedDispatcher)
+        .connectionPool(ConnectionPool(8, 5, TimeUnit.MINUTES))
         .connectTimeout(6, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
+        .callTimeout(15, TimeUnit.SECONDS)
         .build()
 
     private val noRedirectClient = httpClient.newBuilder()
@@ -49,9 +79,8 @@ object DouyinLiveEngine {
     @Volatile
     private var ttwidFetchedAt: Long = 0L
 
-    // 内存短期流缓存（对标网页版 live.php 的 TTL_LIVE 20s 机制）
-    private val streamCache = mutableMapOf<String, Pair<LiveStreamData, Long>>()
-    private const val STREAM_CACHE_TTL = 20_000L
+    // 线程安全的内存短期流缓存（ConcurrentHashMap 防止多协程并发探活竞争）
+    private val streamCache = ConcurrentHashMap<String, Pair<LiveStreamData, Long>>()
 
     fun clearCache() {
         streamCache.clear()
@@ -76,11 +105,11 @@ object DouyinLiveEngine {
      * 1. 提取输入源：支持整段手机分享口令、官方短链、PC 网页链接、纯数字房间号
      */
     suspend fun extractRoomId(rawInput: String): Pair<String?, Boolean> = withContext(Dispatchers.IO) {
-        val text = rawInput.trim()
+        val text = rawInput.trim().take(4096)
         if (text.isEmpty()) return@withContext Pair(null, false)
 
         // 匹配短链接例如 https://v.douyin.com/iABCxyz/
-        val shortMatcher = Pattern.compile("https?://v\\.douyin\\.com/[A-Za-z0-9_-]+/?").matcher(text)
+        val shortMatcher = PATTERN_SHORT_URL.matcher(text)
         if (shortMatcher.find()) {
             val shortUrl = shortMatcher.group(0) ?: ""
             val resolved = resolveShortUrl(shortUrl)
@@ -90,7 +119,7 @@ object DouyinLiveEngine {
         }
 
         // 匹配 PC 网页链接 live.douyin.com/xxx 或 follow/live/xxx
-        val webMatcher = Pattern.compile("(?:live\\.douyin\\.com/|follow/live/)(\\d{3,22})").matcher(text)
+        val webMatcher = PATTERN_WEB_URL.matcher(text)
         if (webMatcher.find()) {
             val rid = webMatcher.group(1)
             val isOnce = (rid?.length ?: 0) >= 15
@@ -98,7 +127,7 @@ object DouyinLiveEngine {
         }
 
         // 匹配纯房间数字
-        val numMatcher = Pattern.compile("\\b(\\d{3,22})\\b").matcher(text)
+        val numMatcher = PATTERN_DIGITS.matcher(text)
         if (numMatcher.find()) {
             val rid = numMatcher.group(1)
             val isOnce = (rid?.length ?: 0) >= 15
@@ -136,16 +165,17 @@ object DouyinLiveEngine {
                 .post(postJson.toRequestBody("application/json".toMediaType()))
                 .build()
 
-            val res = httpClient.newCall(req).execute()
-            val cookieHeaders = res.headers("Set-Cookie")
-            for (cookie in cookieHeaders) {
-                val m = Pattern.compile("ttwid=([^;\\s]+)").matcher(cookie)
-                if (m.find()) {
-                    val token = m.group(1) ?: ""
-                    if (token.isNotEmpty()) {
-                        cachedTtwid = token
-                        ttwidFetchedAt = now
-                        return@withContext cachedTtwid
+            httpClient.newCall(req).execute().use { res ->
+                val cookieHeaders = res.headers("Set-Cookie")
+                for (cookie in cookieHeaders) {
+                    val m = PATTERN_TTWID.matcher(cookie)
+                    if (m.find()) {
+                        val token = m.group(1) ?: ""
+                        if (token.isNotEmpty()) {
+                            cachedTtwid = token
+                            ttwidFetchedAt = now
+                            return@withContext cachedTtwid
+                        }
                     }
                 }
             }
@@ -160,16 +190,17 @@ object DouyinLiveEngine {
                 .header("Accept-Language", "zh-CN,zh;q=0.9")
                 .build()
 
-            val res = httpClient.newCall(req).execute()
-            val cookieHeaders = res.headers("Set-Cookie")
-            for (cookie in cookieHeaders) {
-                val m = Pattern.compile("ttwid=([^;\\s]+)").matcher(cookie)
-                if (m.find()) {
-                    val token = m.group(1) ?: ""
-                    if (token.isNotEmpty()) {
-                        cachedTtwid = token
-                        ttwidFetchedAt = now
-                        return@withContext cachedTtwid
+            httpClient.newCall(req).execute().use { res ->
+                val cookieHeaders = res.headers("Set-Cookie")
+                for (cookie in cookieHeaders) {
+                    val m = PATTERN_TTWID.matcher(cookie)
+                    if (m.find()) {
+                        val token = m.group(1) ?: ""
+                        if (token.isNotEmpty()) {
+                            cachedTtwid = token
+                            ttwidFetchedAt = now
+                            return@withContext cachedTtwid
+                        }
                     }
                 }
             }
@@ -186,19 +217,23 @@ object DouyinLiveEngine {
     /**
      * 根据 web_rid 与可选 sec_user_id 获取直播间 HLS/FLV 播放地址
      * 包含 sec_user_id、正确的 User-Agent 与 Cookie，
-     * 解析 stream_data 中的 flv 或 hls 播放流地址，优先匹配高清 (hd) 或超清 (uhd) 质量，
-     * 并处理 hls_pull_url_map 与 flv_pull_url 的多画质回落。
+     * 解析 stream_data 中的 flv 或 hls 播放流地址；TV 端默认 preferSd = true 优先锁定标清 540P (sd)。
      */
-    suspend fun fetchLiveStreams(webRid: String, secUserId: String? = null): Map<String, String>? = withContext(Dispatchers.IO) {
+    @JvmOverloads
+    suspend fun fetchLiveStreams(
+        webRid: String,
+        secUserId: String? = null,
+        preferSd: Boolean = false
+    ): Map<String, String>? = withContext(Dispatchers.IO) {
         try {
             val ttwid = fetchTtwid()
             val secParam = if (!secUserId.isNullOrEmpty()) "&sec_user_id=${URLEncoder.encode(secUserId, "UTF-8")}" else ""
-            val url = "https://live.douyin.com/webcast/room/web/enter/?aid=6383&app_name=douyin_web&live_id=1&device_platform=web&language=zh-CN&enter_from=web_live&cookie_enabled=true&screen_width=1920&screen_height=1080&browser_language=zh-CN&browser_platform=Win32&browser_name=Chrome&browser_version=124.0.0.0&web_rid=$webRid$secParam"
+            val url = "https://live.douyin.com/webcast/room/web/enter/?aid=6383&app_name=douyin_web&live_id=1&device_platform=web&language=zh-CN&enter_from=web_live&cookie_enabled=true&screen_width=1920&screen_height=1080&browser_language=zh-CN&browser_platform=Win32&browser_name=Chrome&browser_version=124.0.0.0&web_rid=${URLEncoder.encode(webRid, "UTF-8")}$secParam"
 
             val request = Request.Builder()
                 .url(url)
                 .header("User-Agent", UA_PC)
-                .header("Referer", "https://live.douyin.com/$webRid")
+                .header("Referer", "https://live.douyin.com/${URLEncoder.encode(webRid, "UTF-8")}")
                 .header("Accept", "application/json, text/plain, */*")
                 .header("Accept-Language", "zh-CN,zh;q=0.9")
                 .apply {
@@ -208,15 +243,18 @@ object DouyinLiveEngine {
                 }
                 .build()
 
-            val response = httpClient.newCall(request).execute()
-            val jsonStr = response.body?.string() ?: return@withContext null
+            val jsonStr = httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@withContext null
+                readBoundedBody(response.body, MAX_API_BODY_BYTES)
+            }
+            if (jsonStr.isEmpty()) return@withContext null
+
             val root = JSONObject(jsonStr)
             val roomCandidates = collectRoomCandidates(root)
             val roomData = roomCandidates.firstOrNull() ?: return@withContext null
 
             val status = roomData.optInt("status")
             if (status != 2) {
-                // 主播未开播
                 return@withContext null
             }
 
@@ -226,60 +264,54 @@ object DouyinLiveEngine {
                 ?.optString("stream_data")
 
             val streams = mutableMapOf<String, String>()
+            val qualityOrder = if (preferSd) {
+                listOf("sd", "ld", "md", "hd", "uhd", "origin")
+            } else {
+                listOf("hd", "uhd", "sd", "origin", "md")
+            }
+
             if (!streamDataRaw.isNullOrEmpty()) {
                 val streamTree = JSONObject(streamDataRaw).optJSONObject("data")
 
-                // 优先取高清 (hd) 或超清 (uhd)，回退标清 (sd) 或原画 (origin)
-                val hdHls = streamTree?.optJSONObject("hd")?.optJSONObject("main")?.optString("hls")
-                val uhdHls = streamTree?.optJSONObject("uhd")?.optJSONObject("main")?.optString("hls")
-                val sdHls = streamTree?.optJSONObject("sd")?.optJSONObject("main")?.optString("hls")
-                val originHls = streamTree?.optJSONObject("origin")?.optJSONObject("main")?.optString("hls")
-                val mdHls = streamTree?.optJSONObject("md")?.optJSONObject("main")?.optString("hls")
-
-                val bestHls = listOf(hdHls, uhdHls, sdHls, originHls, mdHls).firstOrNull { !it.isNullOrEmpty() }
+                val bestHls = qualityOrder.firstNotNullOfOrNull { q ->
+                    fixUrl(streamTree?.optJSONObject(q)?.optJSONObject("main")?.optString("hls"))
+                }
                 if (!bestHls.isNullOrEmpty()) {
-                    streams["hls"] = bestHls.replace("http://", "https://")
+                    streams["hls"] = bestHls
                 }
 
-                // 同理优先取高清 (hd) 或超清 (uhd) 的 FLV 地址
-                val hdFlv = streamTree?.optJSONObject("hd")?.optJSONObject("main")?.optString("flv")
-                val uhdFlv = streamTree?.optJSONObject("uhd")?.optJSONObject("main")?.optString("flv")
-                val sdFlv = streamTree?.optJSONObject("sd")?.optJSONObject("main")?.optString("flv")
-                val originFlv = streamTree?.optJSONObject("origin")?.optJSONObject("main")?.optString("flv")
-                val mdFlv = streamTree?.optJSONObject("md")?.optJSONObject("main")?.optString("flv")
-
-                val bestFlv = listOf(hdFlv, uhdFlv, sdFlv, originFlv, mdFlv).firstOrNull { !it.isNullOrEmpty() }
+                val bestFlv = qualityOrder.firstNotNullOfOrNull { q ->
+                    fixUrl(streamTree?.optJSONObject(q)?.optJSONObject("main")?.optString("flv"))
+                }
                 if (!bestFlv.isNullOrEmpty()) {
-                    streams["flv"] = bestFlv.replace("http://", "https://")
+                    streams["flv"] = bestFlv
                 }
             }
 
-            // 尝试从 hls_pull_url_map 回退 (HD1, FULL_HD1, SD1 等)
+            val mapPriority = if (preferSd) listOf("SD1", "SD2", "HD1", "FULL_HD1") else listOf("HD1", "FULL_HD1", "SD1", "SD2")
+
             if (!streams.containsKey("hls") && streamUrlObj != null) {
                 val hlsMap = streamUrlObj.optJSONObject("hls_pull_url_map")
-                val hdMapHls = hlsMap?.optString("HD1")?.ifEmpty { null }
-                    ?: hlsMap?.optString("FULL_HD1")?.ifEmpty { null }
+                val fallbackHls = mapPriority.firstNotNullOfOrNull { k -> fixUrl(hlsMap?.optString(k)) }
                     ?: extractFirstUrlFromObj(hlsMap)
-                    ?: streamUrlObj.optString("hls_pull_url").ifEmpty { null }
-                if (!hdMapHls.isNullOrEmpty()) {
-                    streams["hls"] = hdMapHls.replace("http://", "https://")
+                    ?: fixUrl(streamUrlObj.optString("hls_pull_url"))
+                if (!fallbackHls.isNullOrEmpty()) {
+                    streams["hls"] = fallbackHls
                 }
             }
 
             if (!streams.containsKey("flv") && streamUrlObj != null) {
                 val flvMap = streamUrlObj.optJSONObject("flv_pull_url")
-                val hdMapFlv = flvMap?.optString("HD1")?.ifEmpty { null }
-                    ?: flvMap?.optString("FULL_HD1")?.ifEmpty { null }
+                val fallbackFlv = mapPriority.firstNotNullOfOrNull { k -> fixUrl(flvMap?.optString(k)) }
                     ?: extractFirstUrlFromObj(flvMap)
-                    ?: streamUrlObj.optString("rtmp_pull_url").ifEmpty { null }
-                if (!hdMapFlv.isNullOrEmpty()) {
-                    streams["flv"] = hdMapFlv.replace("http://", "https://")
+                    ?: fixUrl(streamUrlObj.optString("rtmp_pull_url"))
+                if (!fallbackFlv.isNullOrEmpty()) {
+                    streams["flv"] = fallbackFlv
                 }
             }
 
             return@withContext if (streams.isNotEmpty()) streams else null
-        } catch (e: Exception) {
-            e.printStackTrace()
+        } catch (_: Exception) {
             null
         }
     }
@@ -289,15 +321,17 @@ object DouyinLiveEngine {
      */
     suspend fun resolveShortUrl(url: String): String? = withContext(Dispatchers.IO) {
         try {
+            val safeUrl = sanitizeHttpUrl(url) ?: return@withContext null
             val req = Request.Builder()
-                .url(url)
+                .url(safeUrl)
                 .header("User-Agent", UA_MOBILE)
                 .build()
-            val res = noRedirectClient.newCall(req).execute()
-            val loc = res.header("Location") ?: ""
-            val m = Pattern.compile("(?:reflow/|room_id=|live\\.douyin\\.com/)(\\d{15,22}|\\d{3,14})").matcher(loc)
-            if (m.find()) {
-                return@withContext m.group(1)
+            noRedirectClient.newCall(req).execute().use { res ->
+                val loc = res.header("Location") ?: ""
+                val m = PATTERN_REDIRECT_RID.matcher(loc)
+                if (m.find()) {
+                    return@withContext m.group(1)
+                }
             }
         } catch (_: Exception) {}
         null
@@ -335,8 +369,9 @@ object DouyinLiveEngine {
                     .header("Accept", "application/json")
                     .header("User-Agent", UA_MOBILE)
                     .build()
-                val res = httpClient.newCall(req).execute()
-                val raw = res.body?.string() ?: ""
+                val raw = httpClient.newCall(req).execute().use { res ->
+                    if (res.isSuccessful) readBoundedBody(res.body, MAX_API_BODY_BYTES) else ""
+                }
                 if (raw.isNotEmpty()) {
                     val root = JSONObject(raw)
                     for (candidate in collectRoomCandidates(root)) {
@@ -351,19 +386,21 @@ object DouyinLiveEngine {
         if (needWebEnter) {
             try {
                 val ttwid = getTtwid()
-                val webUrl = "https://live.douyin.com/webcast/room/web/enter/?aid=6383&app_name=douyin_web&live_id=1&device_platform=web&language=zh-CN&enter_from=web_live&cookie_enabled=true&screen_width=1920&screen_height=1080&browser_language=zh-CN&browser_platform=Win32&browser_name=Chrome&browser_version=124.0.0.0&web_rid=$rid"
+                val encodedRid = URLEncoder.encode(rid, "UTF-8")
+                val webUrl = "https://live.douyin.com/webcast/room/web/enter/?aid=6383&app_name=douyin_web&live_id=1&device_platform=web&language=zh-CN&enter_from=web_live&cookie_enabled=true&screen_width=1920&screen_height=1080&browser_language=zh-CN&browser_platform=Win32&browser_name=Chrome&browser_version=124.0.0.0&web_rid=$encodedRid"
                 val reqBuilder = Request.Builder()
                     .url(webUrl)
                     .header("Accept", "application/json, text/plain, */*")
                     .header("Accept-Language", "zh-CN,zh;q=0.9")
-                    .header("Referer", "https://live.douyin.com/$rid")
+                    .header("Referer", "https://live.douyin.com/$encodedRid")
                     .header("User-Agent", UA_PC)
                 if (ttwid.isNotEmpty()) {
                     reqBuilder.header("Cookie", "ttwid=$ttwid")
                 }
 
-                val res = httpClient.newCall(reqBuilder.build()).execute()
-                val raw = res.body?.string() ?: ""
+                val raw = httpClient.newCall(reqBuilder.build()).execute().use { res ->
+                    if (res.isSuccessful) readBoundedBody(res.body, MAX_API_BODY_BYTES) else ""
+                }
                 if (raw.isNotEmpty()) {
                     val root = JSONObject(raw)
                     for (candidate in collectRoomCandidates(root)) {
@@ -387,7 +424,13 @@ object DouyinLiveEngine {
             streams = info.streams
         )
 
-        // 写入短期缓存
+        // 写入短期缓存（控制最大容量并清理过期条目）
+        if (streamCache.size >= MAX_CACHE_ENTRIES) {
+            streamCache.entries.removeIf { (now - it.value.second) >= STREAM_CACHE_TTL }
+            if (streamCache.size >= MAX_CACHE_ENTRIES) {
+                streamCache.clear()
+            }
+        }
         streamCache[rid] = Pair(result, now)
         result
     }
@@ -598,11 +641,114 @@ object DouyinLiveEngine {
     }
 
     private fun fixUrl(url: String?): String? {
+        return sanitizeHttpUrl(url)
+    }
+
+    /**
+     * 规范并校验流媒体与头像 URL：仅放行 http/https 协议并强制升级为 https，拦截 javascript:/file:/data: 等危险协议
+     */
+    fun sanitizeHttpUrl(url: String?): String? {
         if (url.isNullOrBlank()) return null
         val trimmed = url.trim()
-        return if (trimmed.startsWith("http://", ignoreCase = true)) {
-            trimmed.replaceFirst("http://", "https://", ignoreCase = true)
-        } else trimmed
+        if (trimmed.length > 4096) return null
+        val normalized = when {
+            trimmed.startsWith("https://", ignoreCase = true) -> "https://" + trimmed.substring(8)
+            trimmed.startsWith("http://", ignoreCase = true) -> "https://" + trimmed.substring(7)
+            else -> return null
+        }
+        return try {
+            val uri = URI(normalized)
+            val host = uri.host
+            if (host.isNullOrBlank()) null else normalized
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * 校验远程订阅源 URL：强制 HTTPS，并阻断本地环回/内网保留网段 SSRF 攻击面
+     */
+    internal fun validateRemoteImportUrl(url: String): String {
+        val trimmed = url.trim()
+        if (trimmed.length > 2048) {
+            throw IllegalArgumentException("订阅链接长度超出安全限制")
+        }
+        if (!trimmed.startsWith("https://", ignoreCase = true)) {
+            throw IllegalArgumentException("出于传输安全保护，远程订阅仅支持 HTTPS 链接")
+        }
+        val uri = try {
+            URI(trimmed)
+        } catch (_: Exception) {
+            throw IllegalArgumentException("无效的远程链接格式")
+        }
+        if (!uri.userInfo.isNullOrEmpty()) {
+            throw IllegalArgumentException("禁止在订阅链接中携带身份凭据")
+        }
+        val rawHost = uri.host?.lowercase()?.trimEnd('.')?.removePrefix("[")?.removeSuffix("]")
+            ?: throw IllegalArgumentException("远程链接缺少有效域名")
+
+        if (isBlockedSsrfHost(rawHost)) {
+            throw IllegalArgumentException("出于安全限制，禁止访问本地或内网保留地址")
+        }
+        return trimmed
+    }
+
+    internal fun isBlockedSsrfHost(host: String): Boolean {
+        val h = host.lowercase().trimEnd('.').removePrefix("[").removeSuffix("]")
+        if (h.isEmpty() || h == "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal")) {
+            return true
+        }
+        if (h == "::1" || h == "0:0:0:0:0:0:0:1" || h == "0.0.0.0" || h.startsWith("fe80:") || h.startsWith("fc") || h.startsWith("fd")) {
+            return true
+        }
+        // 字面量 IPv4 检测（覆盖离线单测及 DNS 前置拦截）
+        val ipv4Parts = h.split('.')
+        if (ipv4Parts.size == 4 && ipv4Parts.all { p -> p.toIntOrNull()?.let { it in 0..255 } == true }) {
+            val a = ipv4Parts[0].toInt()
+            val b = ipv4Parts[1].toInt()
+            if (a == 127 || a == 10 || a == 0) return true
+            if (a == 169 && b == 254) return true
+            if (a == 172 && b in 16..31) return true
+            if (a == 192 && b == 168) return true
+            if (a == 100 && b in 64..127) return true
+        }
+        // 若主机为已解析 IP（避免直接触发不必要的长时间 DNS），复核 InetAddress 属性
+        return try {
+            val isIpLiteral = h.all { it.isDigit() || it == '.' || it == ':' || it in 'a'..'f' }
+            if (isIpLiteral) {
+                val addr = InetAddress.getByName(h)
+                addr.isAnyLocalAddress || addr.isLoopbackAddress || addr.isLinkLocalAddress ||
+                    addr.isSiteLocalAddress || addr.isMulticastAddress ||
+                    (addr is Inet6Address && ((addr.address[0].toInt() and 0xFE) == 0xFC))
+            } else {
+                false
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun readBoundedBody(body: ResponseBody?, maxBytes: Int): String {
+        if (body == null) return ""
+        val contentLen = body.contentLength()
+        if (contentLen > maxBytes) {
+            throw IllegalStateException("远程响应体积超出安全上限 (${maxBytes / 1024}KB)")
+        }
+        body.byteStream().use { input ->
+            val buffer = ByteArrayOutputStream()
+            val chunk = ByteArray(8192)
+            var total = 0
+            while (true) {
+                val read = input.read(chunk)
+                if (read <= 0) break
+                total += read
+                if (total > maxBytes) {
+                    throw IllegalStateException("远程响应体积超出安全上限 (${maxBytes / 1024}KB)")
+                }
+                buffer.write(chunk, 0, read)
+            }
+            return String(buffer.toByteArray(), StandardCharsets.UTF_8)
+        }
     }
 
     private fun firstNonEmpty(vararg values: String?): String {
@@ -616,29 +762,21 @@ object DouyinLiveEngine {
      * 5. 远程源拉取与合规校验（支持 JSON、TXT、CSV 格式）
      */
     suspend fun fetchRemoteSource(url: String): String = withContext(Dispatchers.IO) {
-        val trimmed = url.trim()
-        if (!trimmed.startsWith("http://", ignoreCase = true) && !trimmed.startsWith("https://", ignoreCase = true)) {
-            throw IllegalArgumentException("仅支持 HTTP / HTTPS 协议的远程链接")
-        }
+        val safeUrl = validateRemoteImportUrl(url)
 
         val req = Request.Builder()
-            .url(trimmed)
+            .url(safeUrl)
             .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DoumouLive/1.0")
             .build()
 
-        val res = try {
-            httpClient.newCall(req).execute()
-        } catch (e: java.net.UnknownServiceException) {
-            throw IllegalStateException("出于传输安全保护，远程订阅请使用 HTTPS 链接 (${e.message ?: "明文HTTP已禁用"})")
+        noRedirectClient.newCall(req).execute().use { res ->
+            if (res.isRedirect) {
+                throw IllegalStateException("出于安全防护，远程订阅不支持自动跳转重定向")
+            }
+            if (!res.isSuccessful) {
+                throw IllegalStateException("远程服务器响应错误，HTTP ${res.code}")
+            }
+            readBoundedBody(res.body, MAX_REMOTE_SOURCE_BYTES)
         }
-        if (!res.isSuccessful) {
-            throw IllegalStateException("远程服务器响应错误，HTTP ${res.code}")
-        }
-
-        val body = res.body?.string() ?: ""
-        if (body.length > 1024 * 1024) {
-            throw IllegalStateException("远程源文件体积过大（上限 1MB）")
-        }
-        body
     }
 }
